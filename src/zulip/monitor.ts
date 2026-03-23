@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
+import {
+  isRelayRunRegistered,
+  registerMainRelayRun,
+  updateRelayRunModel,
+} from "../agents/subagent-relay.js";
 import { getZulipRuntime } from "../runtime.js";
 import {
   resolveZulipAccount,
@@ -25,6 +30,13 @@ import {
   writeZulipInFlightCheckpoint,
 } from "./inflight-checkpoints.js";
 import { normalizeStreamName, normalizeTopic } from "./normalize.js";
+import {
+  isZulipMessageAlreadyProcessed,
+  loadZulipProcessedMessageState,
+  markZulipMessageProcessed,
+  type ZulipProcessedMessageState,
+  writeZulipProcessedMessageState,
+} from "./processed-message-state.js";
 import { buildZulipQueuePlan, buildZulipRegisterNarrow } from "./queue-plan.js";
 import {
   getReactionButtonSession,
@@ -34,6 +46,7 @@ import {
 } from "./reaction-buttons.js";
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
 import { sendZulipStreamMessage } from "./send.js";
+import { ToolProgressAccumulator } from "./tool-progress.js";
 import { downloadZulipUploads, resolveOutboundMedia, uploadZulipFile } from "./uploads.js";
 
 export type MonitorZulipOptions = {
@@ -92,6 +105,8 @@ type ZulipUpdateMessageEvent = {
   orig_subject?: string;
   topic?: string;
   orig_topic?: string;
+  stream_id?: number;
+  orig_stream_id?: number;
 };
 
 type ZulipEvent = {
@@ -102,6 +117,8 @@ type ZulipEvent = {
   orig_subject?: string;
   topic?: string;
   orig_topic?: string;
+  stream_id?: number;
+  orig_stream_id?: number;
 } & Partial<ZulipReactionEvent>;
 
 type ZulipEventsResponse = {
@@ -119,10 +136,73 @@ type ZulipMeResponse = {
   full_name?: string;
 };
 
+type ZulipMessageSource = "poll" | "catchup" | "freshness" | "recovery";
+
+type ZulipTraceContext = {
+  source: ZulipMessageSource;
+  activeHandlers: number;
+  waiterDepth: number;
+};
+
+type PreparedZulipMessage = {
+  msg: ZulipEventMessage;
+  source: ZulipMessageSource;
+  stream: string;
+  topic: string;
+  content: string;
+  isRecovery: boolean;
+  queuedReactionStarted: boolean;
+  reactionController: ReactionTransitionController | null;
+  trace: ZulipTraceContext;
+};
+
 export const DEFAULT_DISPATCH_WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
 export const KEEPALIVE_INITIAL_DELAY_MS = 25_000;
 export const KEEPALIVE_REPEAT_INTERVAL_MS = 60_000;
 export const ZULIP_RECOVERY_NOTICE = "🔄 Gateway restarted - resuming the previous task now...";
+
+function buildZulipTraceLog(params: {
+  accountId: string;
+  milestone: string;
+  messageId?: number;
+  stream?: string;
+  topic?: string;
+  sessionKey?: string;
+  source?: ZulipMessageSource;
+  activeHandlers?: number;
+  waiterDepth?: number;
+  extra?: Record<string, boolean | number | string | undefined>;
+}): string {
+  const fields: string[] = [`[zulip-trace][${params.accountId}]`, `milestone=${params.milestone}`];
+
+  const pushField = (key: string, value: boolean | number | string | undefined) => {
+    if (value === undefined) {
+      return;
+    }
+    if (typeof value === "string") {
+      fields.push(`${key}=${JSON.stringify(value)}`);
+      return;
+    }
+    fields.push(`${key}=${String(value)}`);
+  };
+
+  pushField("source", params.source);
+  pushField("messageId", params.messageId);
+  pushField("stream", params.stream);
+  pushField("topic", params.topic);
+  pushField("sessionKey", params.sessionKey);
+  pushField("activeHandlers", params.activeHandlers);
+  pushField("waiterDepth", params.waiterDepth);
+  for (const [key, value] of Object.entries(params.extra ?? {})) {
+    pushField(key, value);
+  }
+
+  return fields.join(" ");
+}
+
+function buildMainRelayRunId(accountId: string, messageId: number): string {
+  return `zulip-main:${accountId}:${messageId}`;
+}
 
 function formatKeepaliveElapsed(elapsedMs: number): string {
   const totalSeconds = Math.max(1, Math.floor(elapsedMs / 1000));
@@ -312,13 +392,33 @@ function isZulipUpdateMessageEvent(event: ZulipEvent): event is ZulipUpdateMessa
 
 function parseTopicRenameEvent(
   event: ZulipEvent,
-): { fromTopic: string; toTopic: string } | undefined {
+): { fromTopic: string; toTopic: string; origStreamId?: number; newStreamId?: number } | undefined {
   if (!isZulipUpdateMessageEvent(event)) {
     return undefined;
   }
 
+  const origStreamId = event.orig_stream_id;
+  const newStreamId = event.stream_id;
+  const isCrossStream =
+    typeof origStreamId === "number" &&
+    typeof newStreamId === "number" &&
+    origStreamId !== newStreamId;
+
   const fromTopic = normalizeTopic(event.orig_topic ?? event.orig_subject);
   const toTopic = normalizeTopic(event.topic ?? event.subject);
+
+  if (isCrossStream) {
+    // For cross-stream moves, the topic name may or may not change.
+    // If orig_topic is absent, the topic name stayed the same during the move.
+    const effectiveFrom = fromTopic || toTopic;
+    const effectiveTo = toTopic || fromTopic;
+    if (!effectiveFrom || !effectiveTo) {
+      return undefined;
+    }
+    return { fromTopic: effectiveFrom, toTopic: effectiveTo, origStreamId, newStreamId };
+  }
+
+  // Same-stream: require actual topic name change.
   if (!fromTopic || !toTopic) {
     return undefined;
   }
@@ -331,43 +431,44 @@ function parseTopicRenameEvent(
 }
 
 function resolveCanonicalTopicSessionKey(params: {
-  aliasesByStream: Map<string, Map<string, string>>;
+  aliases: Map<string, string>;
   stream: string;
   topic: string;
-}): string {
-  const aliases = params.aliasesByStream.get(params.stream);
+}): { stream: string; topicKey: string } {
   const topicKey = buildTopicKey(params.topic);
-  if (!aliases) {
-    return topicKey;
-  }
+  let compositeKey = `${params.stream}\0${topicKey}`;
 
-  let canonicalKey = topicKey;
   const visited = new Set<string>();
   const visitedOrder: string[] = [];
 
   while (true) {
-    const next = aliases.get(canonicalKey);
-    if (!next || next === canonicalKey || visited.has(canonicalKey)) {
+    const next = params.aliases.get(compositeKey);
+    if (!next || next === compositeKey || visited.has(compositeKey)) {
       break;
     }
-    visited.add(canonicalKey);
-    visitedOrder.push(canonicalKey);
-    canonicalKey = next;
+    visited.add(compositeKey);
+    visitedOrder.push(compositeKey);
+    compositeKey = next;
   }
 
+  // Path compression: point all intermediate aliases directly at the canonical key.
   if (visitedOrder.length > 0) {
     for (const alias of visitedOrder) {
-      aliases.set(alias, canonicalKey);
+      params.aliases.set(alias, compositeKey);
     }
   }
 
-  return canonicalKey;
+  const sepIdx = compositeKey.indexOf("\0");
+  const stream = compositeKey.substring(0, sepIdx);
+  const resolvedTopicKey = compositeKey.substring(sepIdx + 1);
+  return { stream, topicKey: resolvedTopicKey };
 }
 
 function recordTopicRenameAlias(params: {
-  aliasesByStream: Map<string, Map<string, string>>;
-  stream: string;
+  aliases: Map<string, string>;
+  fromStream: string;
   fromTopic: string;
+  toStream: string;
   toTopic: string;
 }): boolean {
   const fromTopic = normalizeTopic(params.fromTopic);
@@ -376,28 +477,25 @@ function recordTopicRenameAlias(params: {
     return false;
   }
 
-  const fromCanonicalKey = resolveCanonicalTopicSessionKey({
-    aliasesByStream: params.aliasesByStream,
-    stream: params.stream,
+  const fromResult = resolveCanonicalTopicSessionKey({
+    aliases: params.aliases,
+    stream: params.fromStream,
     topic: fromTopic,
   });
-  const toCanonicalKey = resolveCanonicalTopicSessionKey({
-    aliasesByStream: params.aliasesByStream,
-    stream: params.stream,
+  const toResult = resolveCanonicalTopicSessionKey({
+    aliases: params.aliases,
+    stream: params.toStream,
     topic: toTopic,
   });
 
-  if (fromCanonicalKey === toCanonicalKey) {
+  const fromCompositeKey = `${fromResult.stream}\0${fromResult.topicKey}`;
+  const toCompositeKey = `${toResult.stream}\0${toResult.topicKey}`;
+
+  if (fromCompositeKey === toCompositeKey) {
     return false;
   }
 
-  let aliases = params.aliasesByStream.get(params.stream);
-  if (!aliases) {
-    aliases = new Map<string, string>();
-    params.aliasesByStream.set(params.stream, aliases);
-  }
-
-  aliases.set(toCanonicalKey, fromCanonicalKey);
+  params.aliases.set(toCompositeKey, fromCompositeKey);
   return true;
 }
 
@@ -426,6 +524,35 @@ async function fetchZulipMe(auth: ZulipAuth, abortSignal?: AbortSignal): Promise
     path: "/api/v1/users/me",
     abortSignal,
   });
+}
+
+async function fetchZulipSubscriptions(
+  auth: ZulipAuth,
+  abortSignal?: AbortSignal,
+): Promise<Map<number, string>> {
+  try {
+    const res = await zulipRequest<{
+      result: "success" | "error";
+      subscriptions?: Array<{ stream_id: number; name: string }>;
+    }>({
+      auth,
+      method: "GET",
+      path: "/api/v1/users/me/subscriptions",
+      abortSignal,
+    });
+    const map = new Map<number, string>();
+    if (res.result === "success" && res.subscriptions) {
+      for (const sub of res.subscriptions) {
+        if (typeof sub.stream_id === "number" && sub.name) {
+          map.set(sub.stream_id, sub.name);
+        }
+      }
+    }
+    return map;
+  } catch {
+    // Non-critical: stream ID resolution can also be populated from message events.
+    return new Map<number, string>();
+  }
 }
 
 async function registerQueue(params: {
@@ -920,50 +1047,218 @@ export async function monitorZulipProvider(
       throw new Error(me.msg || "Failed to fetch Zulip bot identity");
     }
     const botUserId = me.user_id;
+    const botDisplayName = me.full_name?.trim() || "Agent";
     logger.warn(`[zulip-debug][${account.accountId}] bot user_id=${botUserId}`);
 
     // Dedupe cache prevents reprocessing messages after queue re-registration or reconnect.
     const dedupe = createDedupeCache({ ttlMs: 5 * 60 * 1000, maxSize: 500 });
 
+    // Durable message watermark state prevents duplicate processing across restarts.
+    let processedMessageState: ZulipProcessedMessageState = await loadZulipProcessedMessageState({
+      accountId: account.accountId,
+    });
+    let processedMessageWriteChain: Promise<void> = Promise.resolve();
+    const persistProcessedMessageState = () => {
+      processedMessageWriteChain = processedMessageWriteChain
+        .catch(() => undefined)
+        .then(async () => {
+          await writeZulipProcessedMessageState({ state: processedMessageState });
+        })
+        .catch((err) => {
+          runtime.error?.(
+            `[zulip:${account.accountId}] failed to persist processed-message state: ${String(err)}`,
+          );
+        });
+      return processedMessageWriteChain;
+    };
+
     // Track DM senders we've already notified to avoid spam.
     const dmNotifiedSenders = new Set<number>();
-    // Topic-rename alias map per stream: renamed-topic-key -> canonical-topic-key.
-    const topicAliasesByStream = new Map<string, Map<string, string>>();
+    // Topic-rename alias map: composite keys "stream\0topicKey" -> canonical "stream\0topicKey".
+    // Supports both same-stream renames and cross-stream topic moves.
+    const topicAliases = new Map<string, string>();
+    // Stream ID -> stream name mapping for resolving cross-stream move events.
+    const streamIdToName = await fetchZulipSubscriptions(auth, abortSignal);
 
-    const handleMessage = async (
-      msg: ZulipEventMessage,
-      messageOptions?: { recoveryCheckpoint?: ZulipInFlightCheckpoint },
-    ) => {
+    const logTrace = (params: {
+      milestone: string;
+      messageId?: number;
+      stream?: string;
+      topic?: string;
+      sessionKey?: string;
+      source?: ZulipMessageSource;
+      activeHandlers?: number;
+      waiterDepth?: number;
+      extra?: Record<string, boolean | number | string | undefined>;
+    }) => {
+      logger.debug?.(
+        buildZulipTraceLog({
+          accountId: account.accountId,
+          ...params,
+        }),
+      );
+    };
+
+    const sendQueuedReaction = async (params: {
+      msg: ZulipEventMessage;
+      stream: string;
+      topic: string;
+      source: ZulipMessageSource;
+      trace: ZulipTraceContext;
+    }): Promise<{
+      queuedReactionStarted: boolean;
+      reactionController: ReactionTransitionController | null;
+    }> => {
+      const reactions = account.reactions;
+      if (!reactions.enabled) {
+        return { queuedReactionStarted: false, reactionController: null };
+      }
+
+      logTrace({
+        milestone: "queued_reaction_start",
+        source: params.source,
+        messageId: params.msg.id,
+        stream: params.stream,
+        topic: params.topic,
+        activeHandlers: params.trace.activeHandlers,
+        waiterDepth: params.trace.waiterDepth,
+      });
+
+      if (reactions.workflow.enabled) {
+        const reactionController = createReactionTransitionController({
+          auth,
+          messageId: params.msg.id,
+          reactions,
+          log: (message) => logger.debug?.(message),
+        });
+        await reactionController.transition("queued", { abortSignal });
+        logTrace({
+          milestone: "queued_reaction_done",
+          source: params.source,
+          messageId: params.msg.id,
+          stream: params.stream,
+          topic: params.topic,
+          activeHandlers: params.trace.activeHandlers,
+          waiterDepth: params.trace.waiterDepth,
+          extra: { reactionMode: "workflow" },
+        });
+        return { queuedReactionStarted: true, reactionController };
+      }
+
+      await bestEffortReaction({
+        auth,
+        messageId: params.msg.id,
+        op: "add",
+        emojiName: reactions.onStart,
+        log: (message) => logger.debug?.(message),
+        abortSignal,
+      });
+      logTrace({
+        milestone: "queued_reaction_done",
+        source: params.source,
+        messageId: params.msg.id,
+        stream: params.stream,
+        topic: params.topic,
+        activeHandlers: params.trace.activeHandlers,
+        waiterDepth: params.trace.waiterDepth,
+        extra: { reactionMode: "classic" },
+      });
+      return { queuedReactionStarted: true, reactionController: null };
+    };
+
+    const prepareMessageForHandling = async (params: {
+      msg: ZulipEventMessage;
+      source: ZulipMessageSource;
+      activeHandlers: number;
+      waiterDepth: number;
+      recoveryCheckpoint?: ZulipInFlightCheckpoint;
+    }): Promise<PreparedZulipMessage | undefined> => {
+      const { msg } = params;
       if (typeof msg.id !== "number") {
-        return;
+        return undefined;
       }
       if (dedupe.check(String(msg.id))) {
-        return;
-      }
-      const ignore = shouldIgnoreMessage({ message: msg, botUserId, streams: account.streams });
-      if (ignore.ignore) {
-        return;
+        return undefined;
       }
 
-      const isRecovery = Boolean(messageOptions?.recoveryCheckpoint);
+      const ignore = shouldIgnoreMessage({ message: msg, botUserId, streams: account.streams });
+      if (ignore.ignore) {
+        return undefined;
+      }
+
+      const isRecovery = Boolean(params.recoveryCheckpoint);
       const stream = normalizeStreamName(msg.display_recipient);
       const topic = normalizeTopic(msg.subject) || account.defaultTopic;
       const content = msg.content ?? "";
       if (!stream) {
-        return;
+        return undefined;
       }
+      if (
+        !isRecovery &&
+        isZulipMessageAlreadyProcessed({ state: processedMessageState, stream, messageId: msg.id })
+      ) {
+        logger.debug?.(
+          `[zulip:${account.accountId}] skip already-processed message ${msg.id} (${stream}) from durable watermark`,
+        );
+        return undefined;
+      }
+      if (!content.trim() && !content.includes("/user_uploads/")) {
+        return undefined;
+      }
+
+      const trace: ZulipTraceContext = {
+        source: params.source,
+        activeHandlers: params.activeHandlers,
+        waiterDepth: params.waiterDepth,
+      };
+      logTrace({
+        milestone: "event_seen",
+        source: params.source,
+        messageId: msg.id,
+        stream,
+        topic,
+        activeHandlers: params.activeHandlers,
+        waiterDepth: params.waiterDepth,
+      });
+
       if (isRecovery) {
         logger.warn(
           `[zulip:${account.accountId}] replaying recovery checkpoint for message ${msg.id} (${stream}#${topic})`,
         );
       }
-      // Defer the definitive empty-content check until after upload processing —
-      // image-only messages have content (upload URLs) that gets stripped later,
-      // but should still be processed as media. Quick pre-check: bail only if
-      // content is truly blank AND contains no upload references at all.
-      if (!content.trim() && !content.includes("/user_uploads/")) {
-        return;
-      }
+
+      const queuedReaction = isRecovery
+        ? { queuedReactionStarted: false, reactionController: null }
+        : await sendQueuedReaction({
+            msg,
+            stream,
+            topic,
+            source: params.source,
+            trace,
+          });
+
+      return {
+        msg,
+        source: params.source,
+        stream,
+        topic,
+        content,
+        isRecovery,
+        queuedReactionStarted: queuedReaction.queuedReactionStarted,
+        reactionController: queuedReaction.reactionController,
+        trace,
+      };
+    };
+
+    const handleMessage = async (
+      prepared: PreparedZulipMessage,
+      messageOptions?: { recoveryCheckpoint?: ZulipInFlightCheckpoint },
+    ) => {
+      const msg = prepared.msg;
+      const stream = prepared.stream;
+      const topic = prepared.topic;
+      const content = prepared.content;
+      const isRecovery = prepared.isRecovery;
 
       core.channel.activity.record({
         channel: "zulip",
@@ -1013,26 +1308,23 @@ export async function monitorZulipProvider(
       }
 
       const reactions = account.reactions;
-      const reactionController =
-        reactions.enabled && reactions.workflow.enabled
-          ? createReactionTransitionController({
-              auth,
-              messageId: msg.id,
-              reactions,
-              log: (m) => logger.debug?.(m),
-            })
-          : null;
-
-      if (reactionController) {
-        await reactionController.transition("queued", { abortSignal });
-      } else if (reactions.enabled) {
-        await bestEffortReaction({
+      let reactionController = prepared.reactionController;
+      if (!prepared.queuedReactionStarted) {
+        const queuedReaction = await sendQueuedReaction({
+          msg,
+          stream,
+          topic,
+          source: prepared.source,
+          trace: prepared.trace,
+        });
+        reactionController = queuedReaction.reactionController ?? reactionController;
+      }
+      if (!reactionController && reactions.enabled && reactions.workflow.enabled) {
+        reactionController = createReactionTransitionController({
           auth,
           messageId: msg.id,
-          op: "add",
-          emojiName: reactions.onStart,
+          reactions,
           log: (m) => logger.debug?.(m),
-          abortSignal,
         });
       }
 
@@ -1082,19 +1374,35 @@ export async function monitorZulipProvider(
         return;
       }
 
+      // Populate stream ID -> name mapping from message events as a fallback.
+      if (typeof msg.stream_id === "number" && stream) {
+        streamIdToName.set(msg.stream_id, stream);
+      }
+      // Resolve canonical stream + topic for session continuity across renames and cross-stream moves.
+      const { stream: canonicalStream, topicKey: canonicalTopicKey } =
+        resolveCanonicalTopicSessionKey({
+          aliases: topicAliases,
+          stream,
+          topic,
+        });
       const route = core.channel.routing.resolveAgentRoute({
         cfg,
         channel: "zulip",
         accountId: account.accountId,
-        peer: { kind: "channel", id: stream },
+        peer: { kind: "channel", id: canonicalStream },
       });
       const baseSessionKey = route.sessionKey;
-      const canonicalTopicKey = resolveCanonicalTopicSessionKey({
-        aliasesByStream: topicAliasesByStream,
+      const sessionKey = `${baseSessionKey}:topic:${canonicalTopicKey}`;
+      logTrace({
+        milestone: "handler_start",
+        source: prepared.source,
+        messageId: msg.id,
         stream,
         topic,
+        sessionKey,
+        activeHandlers: prepared.trace.activeHandlers,
+        waiterDepth: prepared.trace.waiterDepth,
       });
-      const sessionKey = `${baseSessionKey}:topic:${canonicalTopicKey}`;
 
       const to = `stream:${stream}#${topic}`;
       const from = `zulip:channel:${stream}`;
@@ -1192,19 +1500,100 @@ export async function monitorZulipProvider(
         runtime.error?.(`[zulip] failed to persist in-flight checkpoint: ${String(err)}`);
       }
 
-      const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
-        cfg,
-        agentId: route.agentId,
-        channel: "zulip",
-        accountId: account.accountId,
-      });
+      const mainRelayRunId = buildMainRelayRunId(account.accountId, msg.id);
+      let mainRelayRegistered = false;
+      let mainRelayModel = "default";
+
+      const { onModelSelected: originalOnModelSelected, ...prefixOptions } =
+        createReplyPrefixOptions({
+          cfg,
+          agentId: route.agentId,
+          channel: "zulip",
+          accountId: account.accountId,
+        });
+      const onModelSelected = (ctx: { model: string; provider?: string; thinkLevel?: string }) => {
+        originalOnModelSelected(ctx);
+        if (ctx.model) {
+          mainRelayModel = ctx.model;
+          toolProgress.setModel(ctx.model);
+          updateRelayRunModel(mainRelayRunId, ctx.model);
+        }
+      };
+
+      const isMainRelayActive = () => mainRelayRegistered && isRelayRunRegistered(mainRelayRunId);
 
       let successfulDeliveries = 0;
+      let firstOutboundLogged = false;
+      const toolProgress = new ToolProgressAccumulator({
+        auth,
+        stream,
+        topic,
+        name: botDisplayName,
+        abortSignal: deliverySignal,
+        log: (m) => logger.debug?.(m),
+      });
       const { dispatcher, replyOptions, markDispatchIdle } =
         core.channel.reply.createReplyDispatcherWithTyping({
           ...prefixOptions,
           humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
-          deliver: async (payload: ReplyPayload) => {
+          deliver: async (payload: ReplyPayload, info?: { kind: string }) => {
+            const kind = info?.kind;
+            // Batch tool result summaries into a single message that gets edited.
+            // Only batch text-only tool payloads; media payloads go through normally.
+            const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
+            if (kind === "tool" && !hasMedia && payload.text?.trim()) {
+              if (isMainRelayActive()) {
+                // Main relay renders structured tool calls via AgentEvent stream.
+                return;
+              }
+              if (!firstOutboundLogged) {
+                firstOutboundLogged = true;
+                logTrace({
+                  milestone: "first_outbound",
+                  source: prepared.source,
+                  messageId: msg.id,
+                  stream,
+                  topic,
+                  sessionKey,
+                  activeHandlers: prepared.trace.activeHandlers,
+                  waiterDepth: prepared.trace.waiterDepth,
+                  extra: { kind: kind ?? "tool" },
+                });
+              }
+              toolProgress.addLine(payload.text.trim());
+              // Count as a successful delivery since the accumulator handles send/edit.
+              successfulDeliveries += 1;
+              opts.statusSink?.({ lastOutboundAt: Date.now() });
+              core.channel.activity.record({
+                channel: "zulip",
+                accountId: account.accountId,
+                direction: "outbound",
+                at: Date.now(),
+              });
+              return;
+            }
+
+            // Finalize the accumulated tool progress before sending non-tool replies,
+            // so the batched tool message appears above the block/final reply.
+            if (kind !== "tool" && toolProgress.hasContent) {
+              await toolProgress.finalize();
+            }
+
+            if (!firstOutboundLogged) {
+              firstOutboundLogged = true;
+              logTrace({
+                milestone: "first_outbound",
+                source: prepared.source,
+                messageId: msg.id,
+                stream,
+                topic,
+                sessionKey,
+                activeHandlers: prepared.trace.activeHandlers,
+                waiterDepth: prepared.trace.waiterDepth,
+                extra: { kind: kind ?? "reply" },
+              });
+            }
+
             // Use deliverySignal (not abortSignal) so in-flight replies survive
             // monitor shutdown with a grace period instead of being killed instantly.
             await deliverReply({
@@ -1235,6 +1624,15 @@ export async function monitorZulipProvider(
 
       const stopKeepalive = startPeriodicKeepalive({
         sendPing: async (elapsedMs) => {
+          if (isMainRelayActive()) {
+            return;
+          }
+          // If tool progress has an active batched message, update it with
+          // a heartbeat instead of sending a separate keepalive message.
+          if (toolProgress.hasContent) {
+            toolProgress.addHeartbeat(elapsedMs);
+            return;
+          }
           await sendZulipStreamMessage({
             auth,
             stream,
@@ -1245,6 +1643,18 @@ export async function monitorZulipProvider(
         },
       });
 
+      mainRelayRegistered =
+        registerMainRelayRun({
+          runId: mainRelayRunId,
+          label: botDisplayName,
+          model: mainRelayModel,
+          deliveryContext: {
+            channel: "zulip",
+            to,
+            accountId: account.accountId,
+          },
+        }) || mainRelayRegistered;
+
       let ok = false;
       let lastDispatchError: unknown;
       const MAX_DISPATCH_RETRIES = 2;
@@ -1254,18 +1664,55 @@ export async function monitorZulipProvider(
             if (reactionController) {
               await reactionController.transition("processing", { abortSignal });
             }
+            logTrace({
+              milestone: "dispatch_start",
+              source: prepared.source,
+              messageId: msg.id,
+              stream,
+              topic,
+              sessionKey,
+              activeHandlers: prepared.trace.activeHandlers,
+              waiterDepth: prepared.trace.waiterDepth,
+              extra: { attempt: attempt + 1 },
+            });
             await core.channel.reply.dispatchReplyFromConfig({
               ctx: ctxPayload,
               cfg,
               dispatcher: dispatchDriver,
               replyOptions: {
                 ...replyOptions,
+                runId: mainRelayRunId,
                 disableBlockStreaming: true,
                 onModelSelected,
+                onAgentRunStart: (runId: string) => {
+                  replyOptions.onAgentRunStart?.(runId);
+                  const registered = registerMainRelayRun({
+                    runId,
+                    label: botDisplayName,
+                    model: mainRelayModel,
+                    deliveryContext: {
+                      channel: "zulip",
+                      to,
+                      accountId: account.accountId,
+                    },
+                  });
+                  mainRelayRegistered = registered || mainRelayRegistered;
+                },
               },
             });
             ok = true;
             lastDispatchError = undefined;
+            logTrace({
+              milestone: "dispatch_done",
+              source: prepared.source,
+              messageId: msg.id,
+              stream,
+              topic,
+              sessionKey,
+              activeHandlers: prepared.trace.activeHandlers,
+              waiterDepth: prepared.trace.waiterDepth,
+              extra: { ok: true, attempt: attempt + 1 },
+            });
             break;
           } catch (err) {
             ok = false;
@@ -1285,6 +1732,17 @@ export async function monitorZulipProvider(
             }
             opts.statusSink?.({ lastError: err instanceof Error ? err.message : String(err) });
             runtime.error?.(`zulip dispatch failed: ${String(err)}`);
+            logTrace({
+              milestone: "dispatch_done",
+              source: prepared.source,
+              messageId: msg.id,
+              stream,
+              topic,
+              sessionKey,
+              activeHandlers: prepared.trace.activeHandlers,
+              waiterDepth: prepared.trace.waiterDepth,
+              extra: { ok: false, attempt: attempt + 1 },
+            });
           }
         }
       } finally {
@@ -1302,6 +1760,12 @@ export async function monitorZulipProvider(
           });
         } finally {
           markDispatchIdle();
+          // Finalize any remaining tool progress (best-effort final edit).
+          // Use finalizeWithError() on failure so the header shows ❌ instead of ✅.
+          const finalizePromise = ok ? toolProgress.finalize() : toolProgress.finalizeWithError();
+          await finalizePromise.catch((err) => {
+            logger.debug?.(`[zulip] tool progress finalize failed: ${String(err)}`);
+          });
           // Clean up periodic keepalive timers.
           stopKeepalive();
           // Clean up typing refresh interval (before stopTypingIndicator)
@@ -1376,6 +1840,16 @@ export async function monitorZulipProvider(
           try {
             if (ok) {
               await clearZulipInFlightCheckpoint({ checkpointId: checkpoint.checkpointId });
+
+              const markedProcessed = markZulipMessageProcessed({
+                state: processedMessageState,
+                stream,
+                messageId: msg.id,
+              });
+              if (markedProcessed.updated) {
+                processedMessageState = markedProcessed.state;
+                await persistProcessedMessageState();
+              }
             } else {
               checkpoint = markZulipCheckpointFailure({
                 checkpoint,
@@ -1386,6 +1860,17 @@ export async function monitorZulipProvider(
           } catch (err) {
             runtime.error?.(`[zulip] failed to update in-flight checkpoint: ${String(err)}`);
           }
+          logTrace({
+            milestone: "cleanup_done",
+            source: prepared.source,
+            messageId: msg.id,
+            stream,
+            topic,
+            sessionKey,
+            activeHandlers: prepared.trace.activeHandlers,
+            waiterDepth: prepared.trace.waiterDepth,
+            extra: { ok, successfulDeliveries },
+          });
         }
       }
     };
@@ -1734,7 +2219,17 @@ export async function monitorZulipProvider(
         };
 
         try {
-          await handleMessage(syntheticMessage, { recoveryCheckpoint: checkpoint });
+          const prepared = await prepareMessageForHandling({
+            msg: syntheticMessage,
+            source: "recovery",
+            activeHandlers: 0,
+            waiterDepth: 0,
+            recoveryCheckpoint: checkpoint,
+          });
+          if (!prepared) {
+            continue;
+          }
+          await handleMessage(prepared, { recoveryCheckpoint: checkpoint });
         } catch (err) {
           runtime.error?.(
             `[zulip:${account.accountId}] recovery replay failed for ${checkpoint.checkpointId}: ${String(err)}`,
@@ -1761,13 +2256,34 @@ export async function monitorZulipProvider(
       let activeHandlers = 0;
       const handlerWaiters: Array<() => void> = [];
 
-      const throttledHandleMessage = async (msg: ZulipEventMessage) => {
+      const throttledHandleMessage = async (msg: ZulipEventMessage, source: ZulipMessageSource) => {
+        const prepared = await prepareMessageForHandling({
+          msg,
+          source,
+          activeHandlers,
+          waiterDepth: handlerWaiters.length,
+        });
+        if (!prepared) {
+          return;
+        }
+
         if (activeHandlers >= MAX_CONCURRENT_HANDLERS) {
+          logTrace({
+            milestone: "handler_wait_start",
+            source,
+            messageId: msg.id,
+            stream: prepared.stream,
+            topic: prepared.topic,
+            activeHandlers,
+            waiterDepth: handlerWaiters.length + 1,
+          });
           await new Promise<void>((resolve) => handlerWaiters.push(resolve));
         }
         activeHandlers++;
         try {
-          await handleMessage(msg);
+          prepared.trace.activeHandlers = activeHandlers;
+          prepared.trace.waiterDepth = handlerWaiters.length;
+          await handleMessage(prepared);
         } finally {
           activeHandlers--;
           const next = handlerWaiters.shift();
@@ -1803,7 +2319,7 @@ export async function monitorZulipProvider(
               if (typeof msg.id === "number" && msg.id > lastSeenMsgId) {
                 caught++;
                 lastSeenMsgId = msg.id;
-                throttledHandleMessage(msg).catch((err) => {
+                throttledHandleMessage(msg, "freshness").catch((err) => {
                   runtime.error?.(`zulip: freshness catchup failed: ${String(err)}`);
                 });
               }
@@ -1854,7 +2370,7 @@ export async function monitorZulipProvider(
                       lastSeenMsgId = msg.id;
                     }
                     // dedupe.check skips already-processed messages
-                    throttledHandleMessage(msg).catch((err) => {
+                    throttledHandleMessage(msg, "catchup").catch((err) => {
                       runtime.error?.(`zulip: catchup message failed: ${String(err)}`);
                     });
                   }
@@ -1896,16 +2412,48 @@ export async function monitorZulipProvider(
             if (!rename) {
               continue;
             }
+
+            let fromStream: string;
+            let toStream: string;
+            if (rename.origStreamId !== undefined && rename.newStreamId !== undefined) {
+              // Cross-stream move: resolve stream IDs to names.
+              const origName = streamIdToName.get(rename.origStreamId);
+              const newName = streamIdToName.get(rename.newStreamId);
+              if (!origName || !newName) {
+                logger.debug?.(
+                  `[zulip:${account.accountId}] cross-stream move: could not resolve stream IDs (orig=${rename.origStreamId}, new=${rename.newStreamId})`,
+                );
+                continue;
+              }
+              // Only track moves between streams we monitor.
+              if (!account.streams.includes(origName) || !account.streams.includes(newName)) {
+                continue;
+              }
+              fromStream = origName;
+              toStream = newName;
+            } else {
+              // Same-stream topic rename.
+              fromStream = stream;
+              toStream = stream;
+            }
+
             const mapped = recordTopicRenameAlias({
-              aliasesByStream: topicAliasesByStream,
-              stream,
+              aliases: topicAliases,
+              fromStream,
               fromTopic: rename.fromTopic,
+              toStream,
               toTopic: rename.toTopic,
             });
             if (mapped) {
-              logger.info(
-                `[zulip:${account.accountId}] mapped topic rename alias for stream "${stream}": "${rename.toTopic}" -> "${rename.fromTopic}"`,
-              );
+              if (fromStream !== toStream) {
+                logger.info(
+                  `[zulip:${account.accountId}] mapped cross-stream topic move: "${toStream}#${rename.toTopic}" -> "${fromStream}#${rename.fromTopic}"`,
+                );
+              } else {
+                logger.info(
+                  `[zulip:${account.accountId}] mapped topic rename alias for stream "${stream}": "${rename.toTopic}" -> "${rename.fromTopic}"`,
+                );
+              }
             }
           }
 
@@ -1979,7 +2527,7 @@ export async function monitorZulipProvider(
           stage = "handle";
           for (const msg of messages) {
             // Use throttled handler with backpressure (max concurrent limit)
-            throttledHandleMessage(msg).catch((err) => {
+            throttledHandleMessage(msg, "poll").catch((err) => {
               runtime.error?.(`zulip: message processing failed: ${String(err)}`);
             });
             // Small stagger between starting each message for natural pacing

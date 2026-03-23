@@ -1,5 +1,6 @@
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
 import { zulipRequestWithRetry } from "./client.js";
+import { ensureBlankLineBeforeTables } from "./normalize.js";
 
 export type ZulipSendMessageResponse = ZulipApiSuccess & {
   id?: number;
@@ -12,6 +13,8 @@ export async function sendZulipStreamMessage(params: {
   content: string;
   abortSignal?: AbortSignal;
 }): Promise<ZulipSendMessageResponse> {
+  const normalizedContent = ensureBlankLineBeforeTables(params.content);
+
   return await zulipRequestWithRetry<ZulipSendMessageResponse>({
     auth: params.auth,
     method: "POST",
@@ -20,9 +23,29 @@ export async function sendZulipStreamMessage(params: {
       type: "stream",
       to: params.stream,
       topic: params.topic,
-      content: params.content,
+      content: normalizedContent,
     },
     abortSignal: params.abortSignal,
     retry: { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 20_000 },
+  });
+}
+
+export async function editZulipStreamMessage(params: {
+  auth: ZulipAuth;
+  messageId: number;
+  content: string;
+  abortSignal?: AbortSignal;
+}): Promise<ZulipApiSuccess> {
+  const normalizedContent = ensureBlankLineBeforeTables(params.content);
+
+  return await zulipRequestWithRetry<ZulipApiSuccess>({
+    auth: params.auth,
+    method: "PATCH",
+    path: `/api/v1/messages/${encodeURIComponent(String(params.messageId))}`,
+    form: {
+      content: normalizedContent,
+    },
+    abortSignal: params.abortSignal,
+    retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5_000 },
   });
 }
