@@ -668,18 +668,16 @@ const BASE_ACTIONS = [
 ] as const;
 
 export const zulipMessageActions: ChannelMessageActionAdapter = {
-  listActions: ({ cfg, accountId }) => {
+  describeMessageTool: ({ cfg, accountId }) => {
     const actions = [...BASE_ACTIONS];
     if (isZulipActionEnabled(cfg, "channel-create", accountId)) actions.push("channel-create");
     if (isZulipActionEnabled(cfg, "channel-edit", accountId)) actions.push("channel-edit");
     if (isZulipActionEnabled(cfg, "channel-delete", accountId)) actions.push("channel-delete");
-    return actions;
-  },
-  supportsAction: ({ action, cfg, accountId }) => {
-    if ((BASE_ACTIONS as readonly string[]).includes(action)) return true;
-    return (CHANNEL_MUTATION_ACTIONS as readonly string[]).includes(action)
-      ? isZulipActionEnabled(cfg, action as ChannelMutationAction, accountId)
-      : false;
+    return {
+      actions,
+      capabilities: null,
+      schema: null,
+    };
   },
   extractToolSend: ({ args }) => {
     const target = args.target ?? args.to;
