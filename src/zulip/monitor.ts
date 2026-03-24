@@ -1541,6 +1541,10 @@ export async function monitorZulipProvider(
           ...prefixOptions,
           humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
           deliver: async (payload: ReplyPayload, info?: { kind: string }) => {
+            if (payload.isReasoning) {
+              // Reasoning/thinking payloads should not be delivered to Zulip.
+              return;
+            }
             const kind = info?.kind;
             // Batch tool result summaries into a single message that gets edited.
             // Only batch text-only tool payloads; media payloads go through normally.
