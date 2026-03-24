@@ -1,5 +1,6 @@
 import {
   createStandardChannelSetupStatus,
+  patchChannelConfigForAccount,
   setSetupChannelEnabled,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/setup";
@@ -13,6 +14,52 @@ import {
 import { probeZulip } from "./zulip/probe.js";
 
 const channel = "zulip" as const;
+
+function createZulipCredential(params: {
+  inputKey: "url" | "userId" | "token";
+  configKey: "baseUrl" | "email" | "apiKey";
+  credentialLabel: string;
+  preferredEnvVar: string;
+  helpTitle: string;
+  helpLines: string[];
+  envPrompt: string;
+  keepPrompt: string;
+  inputPrompt: string;
+}) {
+  return {
+    inputKey: params.inputKey,
+    providerHint: channel,
+    credentialLabel: params.credentialLabel,
+    preferredEnvVar: params.preferredEnvVar,
+    helpTitle: params.helpTitle,
+    helpLines: params.helpLines,
+    envPrompt: params.envPrompt,
+    keepPrompt: params.keepPrompt,
+    inputPrompt: params.inputPrompt,
+    allowEnv: ({ accountId }: { accountId: string }) => accountId === DEFAULT_ACCOUNT_ID,
+    inspect: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId: string }) => {
+      const account = resolveZulipAccount({ cfg, accountId });
+      const value = account[params.configKey as keyof typeof account] as string | undefined;
+      const hasValue = Boolean(value?.trim());
+      return {
+        accountConfigured: hasValue,
+        hasConfiguredValue: hasValue,
+        resolvedValue: value?.trim() || undefined,
+        envValue:
+          accountId === DEFAULT_ACCOUNT_ID
+            ? process.env[params.preferredEnvVar]?.trim() || undefined
+            : undefined,
+      };
+    },
+    applySet: ({ cfg, accountId, value }: { cfg: OpenClawConfig; accountId: string; value: unknown }) =>
+      patchChannelConfigForAccount({
+        cfg,
+        channel,
+        accountId,
+        patch: { enabled: true, [params.configKey]: value },
+      }),
+  };
+}
 
 export const zulipSetupWizard: ChannelSetupWizard = {
   channel,
@@ -37,9 +84,9 @@ export const zulipSetupWizard: ChannelSetupWizard = {
     lines: ZULIP_URL_HELP_LINES,
   },
   credentials: [
-    {
+    createZulipCredential({
       inputKey: "url",
-      providerHint: channel,
+      configKey: "baseUrl",
       credentialLabel: "Zulip base URL",
       preferredEnvVar: "ZULIP_URL",
       helpTitle: "Zulip server URL",
@@ -47,24 +94,10 @@ export const zulipSetupWizard: ChannelSetupWizard = {
       envPrompt: "ZULIP_URL detected. Use env var?",
       keepPrompt: "Zulip base URL already configured. Keep it?",
       inputPrompt: "Enter Zulip base URL",
-      allowEnv: ({ accountId }) => accountId === DEFAULT_ACCOUNT_ID,
-      inspect: ({ cfg, accountId }) => {
-        const account = resolveZulipAccount({ cfg, accountId });
-        const hasValue = Boolean(account.baseUrl?.trim());
-        return {
-          accountConfigured: hasValue,
-          hasConfiguredValue: hasValue,
-          resolvedValue: account.baseUrl?.trim() || undefined,
-          envValue:
-            accountId === DEFAULT_ACCOUNT_ID
-              ? process.env.ZULIP_URL?.trim() || undefined
-              : undefined,
-        };
-      },
-    },
-    {
+    }),
+    createZulipCredential({
       inputKey: "userId",
-      providerHint: channel,
+      configKey: "email",
       credentialLabel: "Zulip bot email",
       preferredEnvVar: "ZULIP_EMAIL",
       helpTitle: "Zulip bot email",
@@ -72,24 +105,10 @@ export const zulipSetupWizard: ChannelSetupWizard = {
       envPrompt: "ZULIP_EMAIL detected. Use env var?",
       keepPrompt: "Zulip bot email already configured. Keep it?",
       inputPrompt: "Enter Zulip bot email",
-      allowEnv: ({ accountId }) => accountId === DEFAULT_ACCOUNT_ID,
-      inspect: ({ cfg, accountId }) => {
-        const account = resolveZulipAccount({ cfg, accountId });
-        const hasValue = Boolean(account.email?.trim());
-        return {
-          accountConfigured: hasValue,
-          hasConfiguredValue: hasValue,
-          resolvedValue: account.email?.trim() || undefined,
-          envValue:
-            accountId === DEFAULT_ACCOUNT_ID
-              ? process.env.ZULIP_EMAIL?.trim() || undefined
-              : undefined,
-        };
-      },
-    },
-    {
+    }),
+    createZulipCredential({
       inputKey: "token",
-      providerHint: channel,
+      configKey: "apiKey",
       credentialLabel: "Zulip bot API key",
       preferredEnvVar: "ZULIP_API_KEY",
       helpTitle: "Zulip bot API key",
@@ -97,21 +116,7 @@ export const zulipSetupWizard: ChannelSetupWizard = {
       envPrompt: "ZULIP_API_KEY detected. Use env var?",
       keepPrompt: "Zulip API key already configured. Keep it?",
       inputPrompt: "Enter Zulip bot API key",
-      allowEnv: ({ accountId }) => accountId === DEFAULT_ACCOUNT_ID,
-      inspect: ({ cfg, accountId }) => {
-        const account = resolveZulipAccount({ cfg, accountId });
-        const hasValue = Boolean(account.apiKey?.trim());
-        return {
-          accountConfigured: hasValue,
-          hasConfiguredValue: hasValue,
-          resolvedValue: account.apiKey?.trim() || undefined,
-          envValue:
-            accountId === DEFAULT_ACCOUNT_ID
-              ? process.env.ZULIP_API_KEY?.trim() || undefined
-              : undefined,
-        };
-      },
-    },
+    }),
   ],
   textInputs: [
     {
