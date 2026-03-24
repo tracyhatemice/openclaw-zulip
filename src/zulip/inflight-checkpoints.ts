@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { resolveStateDir } from "../agents/subagent-relay.js";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 
 export const ZULIP_INFLIGHT_CHECKPOINT_VERSION = 1;
 export const ZULIP_INFLIGHT_MAX_AGE_MS = 30 * 60 * 1000;

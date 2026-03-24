@@ -1,9 +1,12 @@
 {
   "name": "@openclaw/zulip",
-  "version": "2026.2.4",
+  "version": "2026.3.24",
   "description": "OpenClaw Zulip channel plugin",
   "files": [
     "index.ts",
+    "setup-entry.ts",
+    "api.ts",
+    "runtime-api.ts",
     "src/",
     "openclaw.plugin.json",
     "!src/**/*.test.ts"
@@ -17,6 +20,7 @@
     "extensions": [
       "./index.ts"
     ],
+    "setupEntry": "./setup-entry.ts",
     "channel": {
       "id": "zulip",
       "label": "Zulip",

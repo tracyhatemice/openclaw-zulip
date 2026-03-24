@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { resolveStateDir } from "../agents/subagent-relay.js";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 
 export const ZULIP_PROCESSED_MESSAGE_STATE_VERSION = 1;
 

@@ -1,11 +1,15 @@
 import crypto from "node:crypto";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
-import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
-import {
-  isRelayRunRegistered,
-  registerMainRelayRun,
-  updateRelayRunModel,
-} from "../agents/subagent-relay.js";
+import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-reply-pipeline";
+// Relay tracking stubs — no-op until SDK exposes relay API
+const isRelayRunRegistered = (_runId: string): boolean => false;
+const registerMainRelayRun = (_params: {
+  runId: string;
+  label: string;
+  model: string;
+  deliveryContext: { channel: string; to: string; accountId: string };
+}): boolean => true;
+const updateRelayRunModel = (_runId: string, _model: string): void => {};
 import { getZulipRuntime } from "../runtime.js";
 import {
   resolveZulipAccount,

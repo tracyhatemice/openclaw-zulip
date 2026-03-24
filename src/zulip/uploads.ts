@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveChannelMediaMaxBytes, type OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/media-runtime";
 import { getZulipRuntime } from "../runtime.js";
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
 import { normalizeZulipBaseUrl } from "./normalize.js";

@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ChannelMessageActionAdapter } from "openclaw/plugin-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { ChannelMessageActionAdapter } from "openclaw/plugin-sdk/channel-contract";
 import { resolveZulipAccount } from "./accounts.js";
 import type { ZulipAuth } from "./client.js";
 import { zulipRequest, zulipRequestWithRetry } from "./client.js";
