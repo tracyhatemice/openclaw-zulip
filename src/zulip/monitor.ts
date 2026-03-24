@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
-import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 // Relay tracking stubs — no-op until SDK exposes relay API
 const isRelayRunRegistered = (_runId: string): boolean => false;
 const registerMainRelayRun = (_params: {
@@ -1509,7 +1509,7 @@ export async function monitorZulipProvider(
       let mainRelayModel = "default";
 
       const { onModelSelected: originalOnModelSelected, ...prefixOptions } =
-        createReplyPrefixOptions({
+        createChannelReplyPipeline({
           cfg,
           agentId: route.agentId,
           channel: "zulip",
