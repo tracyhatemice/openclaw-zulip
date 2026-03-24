@@ -1,6 +1,9 @@
 {
   "id": "zulip",
+  "kind": "channel",
   "channels": ["zulip"],
+  "name": "Zulip",
+  "description": "OpenClaw Zulip channel plugin",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
