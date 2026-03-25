@@ -140,10 +140,10 @@ export const zulipSetupWizard: ChannelSetupWizard = {
           .split(",")
           .map((s: string) => s.trim())
           .filter(Boolean);
-        // Build Record<streamId, {}> format
-        const streams: Record<string, Record<string, never>> = {};
+        // Build Record<streamId, StreamEntryConfig> with sensible defaults
+        const streams: Record<string, { streamPolicy: string; requireMention: boolean; allowFrom: string[] }> = {};
         for (const name of streamNames) {
-          streams[name] = {};
+          streams[name] = { streamPolicy: "allowlist", requireMention: true, allowFrom: ["*"] };
         }
         const channels = cfg.channels as Record<string, any> | undefined;
         const zulipSection = channels?.zulip ?? {};
