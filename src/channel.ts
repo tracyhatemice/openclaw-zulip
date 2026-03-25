@@ -5,6 +5,14 @@ import {
   formatPairingApproveHint,
   normalizeAccountId,
 } from "openclaw/plugin-sdk/core";
+import { buildLegacyDmAccountAllowlistAdapter } from "openclaw/plugin-sdk/allowlist-config-edit";
+import { createScopedDmSecurityResolver } from "openclaw/plugin-sdk/channel-config-helpers";
+import { createOpenProviderConfiguredRouteWarningCollector } from "openclaw/plugin-sdk/channel-policy";
+import { createChannelDirectoryAdapter } from "openclaw/plugin-sdk/directory-runtime";
+import {
+  listZulipDirectoryGroupsFromConfig,
+  listZulipDirectoryPeersFromConfig,
+} from "./directory-config.js";
 import { resolveZulipGroupRequireMention } from "./group-mentions.js";
 import { getZulipRuntime } from "./runtime.js";
 import { zulipSetupAdapter } from "./setup-core.js";
@@ -18,23 +26,62 @@ import {
 import { zulipMessageActions } from "./zulip/actions.js";
 import { monitorZulipProvider } from "./zulip/monitor.js";
 import { normalizeStreamName, normalizeTopic } from "./zulip/normalize.js";
-import { sendZulipStreamMessage } from "./zulip/send.js";
+import { sendZulipDirectMessage, sendZulipStreamMessage } from "./zulip/send.js";
 import { parseZulipTarget } from "./zulip/targets.js";
+import { collectZulipStatusIssues } from "./status-issues.js";
 import { resolveOutboundMedia, uploadZulipFile } from "./zulip/uploads.js";
 
 const activeProviders = new Map<string, { stop: () => void }>();
 
-export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = createChatChannelPlugin({
+const collectZulipSecurityWarnings =
+  createOpenProviderConfiguredRouteWarningCollector<ResolvedZulipAccount>({
+    providerConfigPresent: (cfg) => cfg.channels?.zulip !== undefined,
+    resolveGroupPolicy: (account) => (account.alwaysReply ? "open" : null),
+    resolveRouteAllowlistConfigured: (account) => account.streams.length > 0,
+    configureRouteAllowlist: {
+      surface: "Zulip streams",
+      openScope: "any stream the bot can access",
+      groupPolicyPath: "channels.zulip.alwaysReply",
+      routeAllowlistPath: "channels.zulip.streams",
+    },
+    missingRouteAllowlist: {
+      surface: "Zulip streams",
+      openBehavior: "with no stream allowlist; any stream can trigger (mention-gated)",
+      remediation: "Set channels.zulip.streams to a list of stream names to limit access",
+    },
+  });
+
+const resolveZulipDmPolicy = createScopedDmSecurityResolver<ResolvedZulipAccount>({
+  channelKey: "zulip",
+  resolvePolicy: (account) => account.config.dm?.policy,
+  resolveAllowFrom: (account) => account.config.dm?.allowFrom,
+  allowFromPathSuffix: "dm.",
+  normalizeEntry: (raw) => raw.trim().replace(/^(zulip|user):/i, ""),
+});
+
+const zulipPluginBase = createZulipPluginBase({
+  setupWizard: zulipSetupWizard,
+  setup: zulipSetupAdapter,
+});
+
+export const zulipPlugin = createChatChannelPlugin({
   base: {
-    ...createZulipPluginBase({
-      setupWizard: zulipSetupWizard,
-      setup: zulipSetupAdapter,
-    }),
+    ...zulipPluginBase,
+    config: zulipPluginBase.config!,
+    capabilities: zulipPluginBase.capabilities!,
     defaults: {
       queue: {
-        mode: "followup",
         debounceMs: 250,
       },
+    },
+    allowlist: {
+      ...buildLegacyDmAccountAllowlistAdapter({
+        channelId: "zulip",
+        resolveAccount: resolveZulipAccount,
+        normalize: ({ cfg, accountId, values }) =>
+          values.map((v) => String(v).trim()).filter(Boolean),
+        resolveDmAllowFrom: (account) => account.config.dm?.allowFrom,
+      }),
     },
     groups: {
       resolveRequireMention: resolveZulipGroupRequireMention,
@@ -47,6 +94,15 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = createChatChanne
         "\\\\B@all\\\\b",
         "\\\\B@everyone\\\\b",
         "\\\\B@stream\\\\b",
+      ],
+    },
+    agentPrompt: {
+      messageToolHints: () => [
+        "- Zulip targets use `stream:<name>#<topic>` format. Topic is optional (defaults to account's defaultTopic).",
+        "- Use `sendWithReactions` action to present numbered choices via emoji reactions (workaround for no interactive buttons).",
+        "- Zulip supports spoiler blocks with ` ```spoiler title\\n...\\n``` ` syntax for collapsible content.",
+        "- Mention users with `@**Full Name**` syntax. Use `@**all**` or `@**everyone**` for wildcard mentions.",
+        "- Use `topic-list` action to list topics in a stream.",
       ],
     },
     messaging: {
@@ -67,6 +123,55 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = createChatChanne
       formatTargetDisplay: ({ target }) => target,
     },
     actions: zulipMessageActions,
+    bindings: {
+      compileConfiguredBinding: ({ conversationId }) => {
+        const normalized = conversationId.trim();
+        return normalized ? { conversationId: normalized } : null;
+      },
+      matchInboundConversation: ({ compiledBinding, conversationId, parentConversationId }) => {
+        if (compiledBinding.conversationId === conversationId) {
+          return { conversationId, matchPriority: 2 };
+        }
+        if (
+          parentConversationId &&
+          parentConversationId !== conversationId &&
+          compiledBinding.conversationId === parentConversationId
+        ) {
+          return { conversationId: parentConversationId, matchPriority: 1 };
+        }
+        return null;
+      },
+    },
+    directory: createChannelDirectoryAdapter({
+      listPeers: async (params) => listZulipDirectoryPeersFromConfig(params),
+      listGroups: async (params) => listZulipDirectoryGroupsFromConfig(params),
+    }),
+    resolver: {
+      resolveTargets: async ({ inputs, kind }) => {
+        if (kind === "group") {
+          return inputs.map((input) => {
+            const cleaned = input.trim().replace(/^(zulip|stream):/i, "");
+            return {
+              input,
+              resolved: Boolean(cleaned),
+              id: cleaned || undefined,
+              name: cleaned || undefined,
+              note: cleaned ? undefined : "invalid stream target",
+            };
+          });
+        }
+        return inputs.map((input) => {
+          const cleaned = input.trim().replace(/^(zulip|user):/i, "");
+          return {
+            input,
+            resolved: Boolean(cleaned),
+            id: cleaned || undefined,
+            name: cleaned || undefined,
+            note: cleaned ? undefined : "invalid user target",
+          };
+        });
+      },
+    },
     status: {
       defaultRuntime: {
         accountId: DEFAULT_ACCOUNT_ID,
@@ -100,19 +205,24 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = createChatChanne
           return { ok: false, error: err instanceof Error ? err.message : String(err) };
         }
       },
-      buildAccountSnapshot: ({ account, runtime, probe }) => ({
+      buildAccountSnapshot: ({ account, runtime, probe }) => {
+        const running = runtime?.running ?? false;
+        const issues = collectZulipStatusIssues({ account, running });
+        return {
         accountId: account.accountId,
         name: account.name,
         enabled: account.enabled,
         configured: Boolean(account.baseUrl && account.email && account.apiKey),
-        running: runtime?.running ?? false,
+        running,
+        issues,
         lastStartAt: runtime?.lastStartAt ?? null,
         lastStopAt: runtime?.lastStopAt ?? null,
         lastError: runtime?.lastError ?? null,
         probe,
         lastInboundAt: runtime?.lastInboundAt ?? null,
         lastOutboundAt: runtime?.lastOutboundAt ?? null,
-      }),
+      };
+      },
     },
     gateway: {
       startAccount: async (ctx) => {
@@ -143,22 +253,30 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = createChatChanne
     text: {
       idLabel: "zulipUserId",
       message: "Zulip pairing",
-      normalizeAllowEntry: (entry) => entry.trim(),
-      notify: async () => {
-        // MVP: no DMs/pairing flow yet.
+      normalizeAllowEntry: (entry) => entry.trim().replace(/^(zulip|user):/i, ""),
+      notify: async ({ cfg, accountId, id }) => {
+        try {
+          const account = resolveZulipAccount({ cfg, accountId });
+          if (!account.baseUrl || !account.email || !account.apiKey) return;
+          const auth = {
+            baseUrl: account.baseUrl,
+            email: account.email,
+            apiKey: account.apiKey,
+          };
+          await sendZulipDirectMessage({
+            auth,
+            to: id,
+            content: `Your pairing request has been approved. You can now message this bot directly.`,
+          });
+        } catch {
+          // Best-effort DM notification; swallow errors.
+        }
       },
     },
   },
   security: {
-    dm: {
-      channelKey: "zulip",
-      resolvePolicy: () => "disabled",
-      resolveAllowFrom: () => [],
-      policyPathSuffix: "dmPolicy",
-      allowFromPathSuffix: "allowFrom",
-      approveHint: formatPairingApproveHint("zulip"),
-      normalizeEntry: (raw) => raw.trim(),
-    },
+    resolveDmPolicy: resolveZulipDmPolicy,
+    collectWarnings: collectZulipSecurityWarnings,
   },
   outbound: {
     base: {

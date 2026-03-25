@@ -54,6 +54,22 @@ export type ZulipReactionConfig = {
   genericCallback?: ZulipGenericReactionCallbackConfig;
 };
 
+export type ZulipDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
+
+export type ZulipDmConfig = {
+  /** DM policy: "open" (allow all), "pairing" (require approval), "allowlist" (only listed users), "disabled" (no DMs). Default: "disabled". */
+  policy?: ZulipDmPolicy;
+  /** User IDs or emails allowed to DM the bot (when policy is "allowlist"). */
+  allowFrom?: string[];
+};
+
+export type ZulipTopicBindingsConfig = {
+  /** Enable topic-based thread bindings for subagent sessions. */
+  enabled?: boolean;
+  /** Allow subagent spawning to create dedicated topics. */
+  spawnSubagentSessions?: boolean;
+};
+
 export type ZulipAccountConfig = {
   name?: string;
   enabled?: boolean;
@@ -78,6 +94,12 @@ export type ZulipAccountConfig = {
    * Default topic when target omits a topic.
    */
   defaultTopic?: string;
+
+  /** Direct message configuration. */
+  dm?: ZulipDmConfig;
+
+  /** Topic binding configuration for subagent sessions. */
+  topicBindings?: ZulipTopicBindingsConfig;
 
   /** Reaction indicators while responding. */
   reactions?: ZulipReactionConfig;

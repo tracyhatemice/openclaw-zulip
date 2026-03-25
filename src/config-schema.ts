@@ -40,6 +40,32 @@ const ReactionSchema = z
   })
   .strict();
 
+const DmSchema = z
+  .object({
+    policy: z.enum(["open", "pairing", "allowlist", "disabled"]).optional(),
+    allowFrom: z.array(z.string()).optional(),
+  })
+  .strict();
+
+const TopicBindingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    spawnSubagentSessions: z.boolean().optional(),
+  })
+  .strict();
+
+const ActionsSchema = z
+  .object({
+    channelCreate: z.boolean().optional(),
+    channelEdit: z.boolean().optional(),
+    channelDelete: z.boolean().optional(),
+    memberInfo: z.boolean().optional(),
+    search: z.boolean().optional(),
+    edit: z.boolean().optional(),
+    delete: z.boolean().optional(),
+  })
+  .strict();
+
 const ZulipAccountSchemaBase = z
   .object({
     name: z.string().optional(),
@@ -51,6 +77,9 @@ const ZulipAccountSchemaBase = z
     streams: z.array(z.string()).optional(),
     alwaysReply: z.boolean().optional(),
     defaultTopic: z.string().optional(),
+    dm: DmSchema.optional(),
+    topicBindings: TopicBindingsSchema.optional(),
+    actions: ActionsSchema.optional(),
     reactions: ReactionSchema.optional(),
     textChunkLimit: z.number().int().positive().optional(),
     mediaMaxMb: z.number().int().positive().optional(),

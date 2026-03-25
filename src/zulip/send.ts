@@ -30,6 +30,28 @@ export async function sendZulipStreamMessage(params: {
   });
 }
 
+export async function sendZulipDirectMessage(params: {
+  auth: ZulipAuth;
+  to: string | number;
+  content: string;
+  abortSignal?: AbortSignal;
+}): Promise<ZulipSendMessageResponse> {
+  const normalizedContent = ensureBlankLineBeforeTables(params.content);
+
+  return await zulipRequestWithRetry<ZulipSendMessageResponse>({
+    auth: params.auth,
+    method: "POST",
+    path: "/api/v1/messages",
+    form: {
+      type: "direct",
+      to: JSON.stringify([params.to]),
+      content: normalizedContent,
+    },
+    abortSignal: params.abortSignal,
+    retry: { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 20_000 },
+  });
+}
+
 export async function editZulipStreamMessage(params: {
   auth: ZulipAuth;
   messageId: number;

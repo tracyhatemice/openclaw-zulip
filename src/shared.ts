@@ -44,7 +44,7 @@ export function createZulipPluginBase(params: {
     },
     setupWizard: params.setupWizard,
     capabilities: {
-      chatTypes: ["channel", "thread"],
+      chatTypes: ["direct", "channel", "thread"],
       threads: true,
       reactions: true,
       media: true,

@@ -14,13 +14,25 @@ import { uploadZulipFile, resolveOutboundMedia } from "./uploads.js";
 
 type ActionParams = Record<string, unknown>;
 
-const CHANNEL_MUTATION_ACTIONS = ["channel-create", "channel-edit", "channel-delete"] as const;
-type ChannelMutationAction = (typeof CHANNEL_MUTATION_ACTIONS)[number];
+const GATED_ACTIONS = [
+  "channel-create",
+  "channel-edit",
+  "channel-delete",
+  "member-info",
+  "search",
+  "edit",
+  "delete",
+] as const;
+type GatedAction = (typeof GATED_ACTIONS)[number];
 
 type ZulipActionConfig = {
   channelCreate?: boolean;
   channelEdit?: boolean;
   channelDelete?: boolean;
+  memberInfo?: boolean;
+  search?: boolean;
+  edit?: boolean;
+  delete?: boolean;
 };
 
 function resolveZulipActionConfig(
@@ -52,36 +64,54 @@ function resolveZulipActionConfig(
   return provider.actions;
 }
 
+/** Actions that default to disabled (destructive/mutation). */
+const DEFAULTS_TO_DISABLED: ReadonlySet<string> = new Set([
+  "channel-create",
+  "channel-edit",
+  "channel-delete",
+]);
+
+function resolveActionConfigKey(action: GatedAction): keyof ZulipActionConfig {
+  switch (action) {
+    case "channel-create":
+      return "channelCreate";
+    case "channel-edit":
+      return "channelEdit";
+    case "channel-delete":
+      return "channelDelete";
+    case "member-info":
+      return "memberInfo";
+    case "search":
+      return "search";
+    case "edit":
+      return "edit";
+    case "delete":
+      return "delete";
+  }
+}
+
 function isZulipActionEnabled(
   cfg: unknown,
-  action: ChannelMutationAction,
+  action: GatedAction,
   accountId?: string | null,
 ): boolean {
   const actions = resolveZulipActionConfig(cfg, accountId);
-  switch (action) {
-    case "channel-create":
-      return actions?.channelCreate === true;
-    case "channel-edit":
-      return actions?.channelEdit === true;
-    case "channel-delete":
-      return actions?.channelDelete === true;
-  }
+  const key = resolveActionConfigKey(action);
+  const explicit = actions?.[key];
+  if (explicit !== undefined) return explicit;
+  // Channel mutations default to disabled; other gated actions default to enabled.
+  return !DEFAULTS_TO_DISABLED.has(action);
 }
 
 function assertZulipActionEnabled(
   cfg: unknown,
-  action: ChannelMutationAction,
+  action: GatedAction,
   accountId?: string | null,
 ): void {
   if (isZulipActionEnabled(cfg, action, accountId)) return;
+  const key = resolveActionConfigKey(action);
   throw new Error(
-    `Zulip action ${action} is disabled. Enable channels.zulip.actions.${
-      action === "channel-create"
-        ? "channelCreate"
-        : action === "channel-edit"
-          ? "channelEdit"
-          : "channelDelete"
-    } to allow it.`,
+    `Zulip action ${action} is disabled. Enable channels.zulip.actions.${key} to allow it.`,
   );
 }
 
@@ -487,6 +517,48 @@ async function handleChannelDelete(params: ActionParams, cfg: unknown, accountId
   return { ok: true, action: "channel-delete", streamId };
 }
 
+// -- Topic List --
+
+async function handleTopicList(params: ActionParams, cfg: unknown, accountId?: string | null) {
+  const { auth } = resolveAuth(cfg, accountId);
+  const target = optionalString(params, "target");
+  const streamName = optionalString(params, "stream");
+
+  let stream: string | undefined;
+  if (target) {
+    const parsed = parseZulipTarget(target);
+    stream = parsed ? normalizeStreamName(parsed.stream) : normalizeStreamName(target);
+  } else if (streamName) {
+    stream = normalizeStreamName(streamName);
+  }
+  if (!stream) {
+    throw new Error("Missing stream. Provide target (stream:<name>) or stream parameter.");
+  }
+
+  const streamId = await resolveStreamId({ auth, stream });
+
+  type ZulipTopicsResponse = {
+    result?: string;
+    topics?: Array<{ name: string; max_id: number }>;
+    [key: string]: unknown;
+  };
+
+  const response = await zulipRequest<ZulipTopicsResponse>({
+    auth,
+    method: "GET",
+    path: `/api/v1/users/me/${streamId}/topics`,
+  });
+
+  return {
+    ok: true,
+    action: "topic-list",
+    stream,
+    streamId,
+    count: Array.isArray(response.topics) ? response.topics.length : 0,
+    topics: response.topics ?? [],
+  };
+}
+
 // -- Member Info --
 
 async function handleMemberInfo(params: ActionParams, cfg: unknown, accountId?: string | null) {
@@ -655,7 +727,7 @@ async function handleSendWithReactions(
 
 // -- Adapter --
 
-const BASE_ACTIONS = [
+const BASE_ACTIONS: string[] = [
   "send",
   "sendWithReactions",
   "edit",
@@ -664,17 +736,18 @@ const BASE_ACTIONS = [
   "read",
   "search",
   "channel-list",
+  "topic-list",
   "member-info",
-] as const;
+];
 
 export const zulipMessageActions: ChannelMessageActionAdapter = {
   describeMessageTool: ({ cfg, accountId }) => {
-    const actions = [...BASE_ACTIONS];
+    const actions: string[] = [...BASE_ACTIONS];
     if (isZulipActionEnabled(cfg, "channel-create", accountId)) actions.push("channel-create");
     if (isZulipActionEnabled(cfg, "channel-edit", accountId)) actions.push("channel-edit");
     if (isZulipActionEnabled(cfg, "channel-delete", accountId)) actions.push("channel-delete");
     return {
-      actions,
+      actions: actions as unknown as readonly import("openclaw/plugin-sdk/channel-contract").ChannelMessageActionName[],
       capabilities: null,
       schema: null,
     };
@@ -687,7 +760,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
   handleAction: async (ctx): Promise<AgentToolResult<unknown>> => {
     const { action, params, cfg, accountId } = ctx;
     let result: unknown;
-    switch (action) {
+    switch (action as string) {
       case "send":
         result = await handleSend(params, cfg, accountId);
         break;
@@ -695,9 +768,11 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
         result = await handleSendWithReactions(params, cfg, accountId);
         break;
       case "edit":
+        assertZulipActionEnabled(cfg, "edit", accountId);
         result = await handleEdit(params, cfg, accountId);
         break;
       case "delete":
+        assertZulipActionEnabled(cfg, "delete", accountId);
         result = await handleDelete(params, cfg, accountId);
         break;
       case "react":
@@ -707,6 +782,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
         result = await handleRead(params, cfg, accountId);
         break;
       case "search":
+        assertZulipActionEnabled(cfg, "search", accountId);
         result = await handleSearch(params, cfg, accountId);
         break;
       case "channel-list":
@@ -724,7 +800,11 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
         assertZulipActionEnabled(cfg, "channel-delete", accountId);
         result = await handleChannelDelete(params, cfg, accountId);
         break;
+      case "topic-list":
+        result = await handleTopicList(params, cfg, accountId);
+        break;
       case "member-info":
+        assertZulipActionEnabled(cfg, "member-info", accountId);
         result = await handleMemberInfo(params, cfg, accountId);
         break;
       default:
