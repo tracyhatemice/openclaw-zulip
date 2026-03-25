@@ -1,5 +1,5 @@
 {
-  "name": "@openclaw/zulip",
+  "name": "@tracyhatemic/zulip",
   "version": "2026.3.24",
   "description": "OpenClaw Zulip channel plugin",
   "files": [
@@ -12,8 +12,17 @@
     "!src/**/*.test.ts"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.22"
+  },
+  "devDependencies": {
+    "openclaw": "2026.3.23"
   },
   "openclaw": {
     "extensions": [
@@ -30,7 +39,7 @@
       "order": 70
     },
     "install": {
-      "npmSpec": "@openclaw/zulip",
+      "npmSpec": "@tracyhatemic/zulip",
       "localPath": "extensions/zulip",
       "defaultChoice": "npm"
     }
