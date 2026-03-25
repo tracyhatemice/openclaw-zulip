@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/core";
-import type { ZulipAccountConfig, ZulipReactionConfig } from "../types.js";
+import type { ZulipAccountConfig, ZulipReactionConfig, ZulipTopicBindingsConfig } from "../types.js";
 import { normalizeEmojiName, normalizeStreamName, normalizeTopic } from "./normalize.js";
 
 export type ZulipTokenSource = "env" | "config" | "none";
@@ -231,6 +231,29 @@ export function resolveZulipAccount(params: {
     reactions,
     textChunkLimit,
     config: merged,
+  };
+}
+
+export function resolveZulipTopicBindingFlags(params: {
+  cfg: OpenClawConfig;
+  accountId?: string;
+}): { enabled: boolean; spawnSubagentSessions: boolean } {
+  const account = resolveZulipAccount(params);
+  // Single cast location — Zulip plugin config isn't on the SDK's OpenClawConfig type
+  const zulipCfg = params.cfg.channels?.zulip as Record<string, unknown> | undefined;
+  const baseBindings = zulipCfg?.topicBindings as ZulipTopicBindingsConfig | undefined;
+  const accountBindings = (
+    zulipCfg?.accounts as Record<string, Record<string, unknown>> | undefined
+  )?.[account.accountId]?.topicBindings as ZulipTopicBindingsConfig | undefined;
+  const sessionBindings = (params.cfg.session as Record<string, unknown> | undefined)
+    ?.threadBindings as { enabled?: boolean } | undefined;
+  return {
+    enabled:
+      accountBindings?.enabled ?? baseBindings?.enabled ?? sessionBindings?.enabled ?? true,
+    spawnSubagentSessions:
+      accountBindings?.spawnSubagentSessions ??
+      baseBindings?.spawnSubagentSessions ??
+      false,
   };
 }
 

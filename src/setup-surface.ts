@@ -54,7 +54,7 @@ function createZulipCredential(params: {
     applySet: ({ cfg, accountId, value }: { cfg: OpenClawConfig; accountId: string; value: unknown }) =>
       patchChannelConfigForAccount({
         cfg,
-        channel,
+        channel: channel as never, // External plugin — not in SDK's AccountScopedChannel union
         accountId,
         patch: { enabled: true, [params.configKey]: value },
       }),

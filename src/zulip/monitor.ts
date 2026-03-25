@@ -51,6 +51,7 @@ import {
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
 import { sendZulipStreamMessage } from "./send.js";
 import { ToolProgressAccumulator } from "./tool-progress.js";
+import { sendZulipStreamTypingStart, sendZulipStreamTypingStop } from "./typing.js";
 import { downloadZulipUploads, resolveOutboundMedia, uploadZulipFile } from "./uploads.js";
 
 export type MonitorZulipOptions = {
@@ -123,7 +124,14 @@ type ZulipEvent = {
   orig_topic?: string;
   stream_id?: number;
   orig_stream_id?: number;
-} & Partial<ZulipReactionEvent>;
+  // Reaction fields (inlined from ZulipReactionEvent to avoid discriminant conflict on 'type')
+  op?: "add" | "remove";
+  message_id?: number;
+  emoji_name?: string;
+  emoji_code?: string;
+  user_id?: number;
+  user?: { email?: string; full_name?: string; user_id?: number };
+};
 
 type ZulipEventsResponse = {
   result: "success" | "error";
@@ -696,54 +704,6 @@ async function replyToDm(params: {
   }
 }
 
-async function sendTypingIndicator(params: {
-  auth: ZulipAuth;
-  streamId: number;
-  topic: string;
-  abortSignal?: AbortSignal;
-}): Promise<void> {
-  try {
-    await zulipRequest({
-      auth: params.auth,
-      method: "POST",
-      path: "/api/v1/typing",
-      form: {
-        op: "start",
-        type: "stream",
-        stream_id: params.streamId,
-        topic: params.topic,
-      },
-      abortSignal: params.abortSignal,
-    });
-  } catch {
-    // Best effort — typing indicators are non-critical.
-  }
-}
-
-async function stopTypingIndicator(params: {
-  auth: ZulipAuth;
-  streamId: number;
-  topic: string;
-  abortSignal?: AbortSignal;
-}): Promise<void> {
-  try {
-    await zulipRequest({
-      auth: params.auth,
-      method: "POST",
-      path: "/api/v1/typing",
-      form: {
-        op: "stop",
-        type: "stream",
-        stream_id: params.streamId,
-        topic: params.topic,
-      },
-      abortSignal: params.abortSignal,
-    });
-  } catch {
-    // Best effort — typing indicators are non-critical.
-  }
-}
-
 async function bestEffortReaction(params: {
   auth: ZulipAuth;
   messageId: number;
@@ -883,9 +843,9 @@ function createReactionTransitionController(params: {
 
 function withWorkflowReactionStages<
   T extends {
-    sendToolResult: (...args: unknown[]) => unknown;
-    sendBlockReply: (...args: unknown[]) => unknown;
-    sendFinalReply: (...args: unknown[]) => unknown;
+    sendToolResult: (payload: ReplyPayload) => boolean;
+    sendBlockReply: (payload: ReplyPayload) => boolean;
+    sendFinalReply: (payload: ReplyPayload) => boolean;
   },
 >(
   dispatcher: T,
@@ -895,23 +855,23 @@ function withWorkflowReactionStages<
 ): T {
   return {
     ...dispatcher,
-    sendToolResult: (...args: unknown[]) => {
+    sendToolResult: (payload: ReplyPayload) => {
       if (reactions.workflow.stages.toolRunning) {
         void controller.transition("toolRunning", { abortSignal });
       }
-      return dispatcher.sendToolResult(...args);
+      return dispatcher.sendToolResult(payload);
     },
-    sendBlockReply: (...args: unknown[]) => {
+    sendBlockReply: (payload: ReplyPayload) => {
       if (reactions.workflow.stages.processing) {
         void controller.transition("processing", { abortSignal });
       }
-      return dispatcher.sendBlockReply(...args);
+      return dispatcher.sendBlockReply(payload);
     },
-    sendFinalReply: (...args: unknown[]) => {
+    sendFinalReply: (payload: ReplyPayload) => {
       if (reactions.workflow.stages.processing) {
         void controller.transition("processing", { abortSignal });
       }
-      return dispatcher.sendFinalReply(...args);
+      return dispatcher.sendFinalReply(payload);
     },
   };
 }
@@ -952,14 +912,14 @@ async function deliverReply(params: {
       });
       // Delivery receipt verification: check message ID in response
       if (!response || typeof response.id !== "number") {
-        logger.warn(`[zulip] sendZulipStreamMessage returned invalid or missing message ID`);
+        logger.warn?.(`[zulip] sendZulipStreamMessage returned invalid or missing message ID`);
       }
     }
   };
 
   const trimmedText = text.trim();
   if (!trimmedText && mediaUrls.length === 0) {
-    logger.debug(`[zulip] deliverReply: empty response (no text, no media) — skipping`);
+    logger.debug?.(`[zulip] deliverReply: empty response (no text, no media) — skipping`);
     return;
   }
   if (mediaUrls.length === 0) {
@@ -1006,7 +966,7 @@ async function deliverReply(params: {
 
 export async function monitorZulipProvider(
   opts: MonitorZulipOptions,
-): Promise<{ stop: () => void }> {
+): Promise<{ stop: () => void; done: Promise<void> }> {
   const core = getZulipRuntime();
   const cfg = opts.config ?? core.config.loadConfig();
   const account = resolveZulipAccount({
@@ -1014,8 +974,8 @@ export async function monitorZulipProvider(
     accountId: opts.accountId,
   });
   const runtime: RuntimeEnv = opts.runtime ?? {
-    log: (message: string) => core.logging.getChildLogger().info(message),
-    error: (message: string) => core.logging.getChildLogger().error(message),
+    log: (...args: unknown[]) => core.logging.getChildLogger().info(String(args[0])),
+    error: (...args: unknown[]) => core.logging.getChildLogger().error(String(args[0])),
     exit: () => {
       throw new Error("Runtime exit not available");
     },
@@ -1336,12 +1296,13 @@ export async function monitorZulipProvider(
       let typingRefreshInterval: ReturnType<typeof setInterval> | undefined;
 
       // Send typing indicator while the agent processes, and refresh every 10s.
-      if (typeof msg.stream_id === "number") {
-        sendTypingIndicator({ auth, streamId: msg.stream_id, topic, abortSignal }).catch(
+      const msgStreamId = msg.stream_id;
+      if (typeof msgStreamId === "number") {
+        sendZulipStreamTypingStart({ auth, streamId: msgStreamId, topic, abortSignal }).catch(
           () => undefined,
         );
         typingRefreshInterval = setInterval(() => {
-          sendTypingIndicator({ auth, streamId: msg.stream_id, topic, abortSignal }).catch(
+          sendZulipStreamTypingStart({ auth, streamId: msgStreamId, topic, abortSignal }).catch(
             () => undefined,
           );
         }, 10_000);
@@ -1515,7 +1476,7 @@ export async function monitorZulipProvider(
           channel: "zulip",
           accountId: account.accountId,
         });
-      const onModelSelected = (ctx: { model: string; provider?: string; thinkLevel?: string }) => {
+      const onModelSelected = (ctx: { model: string; provider: string; thinkLevel: string | undefined }) => {
         originalOnModelSelected(ctx);
         if (ctx.model) {
           mainRelayModel = ctx.model;
@@ -1693,7 +1654,6 @@ export async function monitorZulipProvider(
                 disableBlockStreaming: true,
                 onModelSelected,
                 onAgentRunStart: (runId: string) => {
-                  replyOptions.onAgentRunStart?.(runId);
                   const registered = registerMainRelayRun({
                     runId,
                     label: botDisplayName,
@@ -1785,7 +1745,7 @@ export async function monitorZulipProvider(
 
           // Stop typing indicator now that the reply has been sent.
           if (typeof msg.stream_id === "number") {
-            stopTypingIndicator({
+            sendZulipStreamTypingStop({
               auth,
               streamId: msg.stream_id,
               topic,
@@ -2013,31 +1973,34 @@ export async function monitorZulipProvider(
           ctx: ctxPayload,
           cfg,
           dispatcher: {
-            sendToolResult: () => Promise.resolve(),
-            sendBlockReply: async (payload: ReplyPayload) => {
+            sendToolResult: () => true,
+            sendBlockReply: (payload: ReplyPayload) => {
               if (payload.text) {
-                await sendZulipStreamMessage({
+                sendZulipStreamMessage({
                   auth,
                   stream: params.stream,
                   topic: params.topic,
                   content: payload.text,
                   abortSignal,
-                });
+                }).catch(() => {});
               }
+              return true;
             },
-            sendFinalReply: async (payload: ReplyPayload) => {
+            sendFinalReply: (payload: ReplyPayload) => {
               if (payload.text) {
-                await sendZulipStreamMessage({
+                sendZulipStreamMessage({
                   auth,
                   stream: params.stream,
                   topic: params.topic,
                   content: payload.text,
                   abortSignal,
-                });
+                }).catch(() => {});
               }
+              return true;
             },
             markComplete: () => {},
             waitForIdle: () => Promise.resolve(),
+            getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
           },
           replyOptions: {
             disableBlockStreaming: true,

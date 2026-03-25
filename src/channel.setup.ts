@@ -4,9 +4,13 @@ import { zulipSetupAdapter } from "./setup-core.js";
 import { zulipSetupWizard } from "./setup-surface.js";
 import { createZulipPluginBase } from "./shared.js";
 
+const base = createZulipPluginBase({
+  setupWizard: zulipSetupWizard,
+  setup: zulipSetupAdapter,
+});
+
 export const zulipSetupPlugin: ChannelPlugin<ResolvedZulipAccount> = {
-  ...createZulipPluginBase({
-    setupWizard: zulipSetupWizard,
-    setup: zulipSetupAdapter,
-  }),
+  ...base,
+  capabilities: base.capabilities!,
+  config: base.config!,
 };

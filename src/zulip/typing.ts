@@ -80,3 +80,57 @@ export async function sendZulipDirectTypingStart(params: {
     // Best-effort.
   }
 }
+
+/**
+ * Send a typing start indicator using a stream ID (used by monitor).
+ */
+export async function sendZulipStreamTypingStart(params: {
+  auth: ZulipAuth;
+  streamId: number;
+  topic: string;
+  abortSignal?: AbortSignal;
+}): Promise<void> {
+  try {
+    await zulipRequest({
+      auth: params.auth,
+      method: "POST",
+      path: "/api/v1/typing",
+      form: {
+        op: "start",
+        type: "stream",
+        stream_id: params.streamId,
+        topic: params.topic,
+      },
+      abortSignal: params.abortSignal,
+    });
+  } catch {
+    // Best-effort — typing indicators are non-critical.
+  }
+}
+
+/**
+ * Send a typing stop indicator using a stream ID (used by monitor).
+ */
+export async function sendZulipStreamTypingStop(params: {
+  auth: ZulipAuth;
+  streamId: number;
+  topic: string;
+  abortSignal?: AbortSignal;
+}): Promise<void> {
+  try {
+    await zulipRequest({
+      auth: params.auth,
+      method: "POST",
+      path: "/api/v1/typing",
+      form: {
+        op: "stop",
+        type: "stream",
+        stream_id: params.streamId,
+        topic: params.topic,
+      },
+      abortSignal: params.abortSignal,
+    });
+  } catch {
+    // Best-effort — typing indicators are non-critical.
+  }
+}

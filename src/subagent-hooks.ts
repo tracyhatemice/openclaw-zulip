@@ -1,5 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import { resolveZulipAccount } from "./zulip/accounts.js";
+import { resolveZulipTopicBindingFlags } from "./zulip/accounts.js";
 import {
   createTopicBinding,
   listTopicBindingsBySessionKey,
@@ -14,36 +14,6 @@ function summarizeError(err: unknown): string {
 }
 
 export function registerZulipSubagentHooks(api: OpenClawPluginApi) {
-  const resolveTopicBindingFlags = (accountId?: string) => {
-    const account = resolveZulipAccount({
-      cfg: api.config,
-      accountId,
-    });
-    const baseBindings = (api.config.channels?.zulip as Record<string, unknown> | undefined)
-      ?.topicBindings as { enabled?: boolean; spawnSubagentSessions?: boolean } | undefined;
-    const accountBindings = (
-      (api.config.channels?.zulip as Record<string, unknown> | undefined)?.accounts as
-        | Record<string, Record<string, unknown>>
-        | undefined
-    )?.[account.accountId]?.topicBindings as
-      | { enabled?: boolean; spawnSubagentSessions?: boolean }
-      | undefined;
-    return {
-      enabled:
-        accountBindings?.enabled ??
-        baseBindings?.enabled ??
-        ((
-          (api.config.session as Record<string, unknown> | undefined)?.threadBindings as
-            | { enabled?: boolean }
-            | undefined
-        )?.enabled ?? true),
-      spawnSubagentSessions:
-        accountBindings?.spawnSubagentSessions ??
-        baseBindings?.spawnSubagentSessions ??
-        false,
-    };
-  };
-
   api.on("subagent_spawning", async (event) => {
     if (!event.threadRequested) {
       return;
@@ -52,7 +22,10 @@ export function registerZulipSubagentHooks(api: OpenClawPluginApi) {
     if (channel !== "zulip") {
       return;
     }
-    const flags = resolveTopicBindingFlags(event.requester?.accountId);
+    const flags = resolveZulipTopicBindingFlags({
+      cfg: api.config,
+      accountId: event.requester?.accountId,
+    });
     if (!flags.enabled) {
       return {
         status: "error" as const,
