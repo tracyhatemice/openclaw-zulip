@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  createReplyPrefixOptions: vi.fn(),
+  createChannelReplyPipeline: vi.fn(),
   getZulipRuntime: vi.fn(),
   resolveZulipAccount: vi.fn(),
   zulipRequest: vi.fn(),
@@ -22,13 +22,9 @@ const mocks = vi.hoisted(() => ({
   buildZulipCheckpointId: vi.fn(),
 }));
 
-vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("openclaw/plugin-sdk")>();
-  return {
-    ...actual,
-    createReplyPrefixOptions: mocks.createReplyPrefixOptions,
-  };
-});
+vi.mock("openclaw/plugin-sdk/channel-reply-pipeline", () => ({
+  createChannelReplyPipeline: mocks.createChannelReplyPipeline,
+}));
 
 vi.mock("../runtime.js", () => ({
   getZulipRuntime: mocks.getZulipRuntime,
@@ -72,6 +68,25 @@ vi.mock("./inflight-checkpoints.js", () => ({
   prepareZulipCheckpointForRecovery: mocks.prepareZulipCheckpointForRecovery,
   markZulipCheckpointFailure: mocks.markZulipCheckpointFailure,
   buildZulipCheckpointId: mocks.buildZulipCheckpointId,
+}));
+
+vi.mock("./processed-message-state.js", () => ({
+  loadZulipProcessedMessageState: vi.fn(async () => ({ accountId: "default", messages: {} })),
+  writeZulipProcessedMessageState: vi.fn(async () => undefined),
+  isZulipMessageAlreadyProcessed: vi.fn(() => false),
+  markZulipMessageProcessed: vi.fn(() => ({ accountId: "default", messages: {} })),
+}));
+
+vi.mock("./reaction-buttons.js", () => ({
+  startReactionButtonSessionCleanup: vi.fn(),
+  stopReactionButtonSessionCleanup: vi.fn(),
+  getReactionButtonSession: vi.fn(() => undefined),
+  handleReactionEvent: vi.fn(),
+}));
+
+vi.mock("./typing.js", () => ({
+  sendZulipStreamTypingStart: vi.fn(async () => undefined),
+  sendZulipStreamTypingStop: vi.fn(async () => undefined),
 }));
 
 import { monitorZulipProvider } from "./monitor.js";
@@ -178,7 +193,7 @@ describe("monitorZulipProvider cleanup race", () => {
     };
 
     mocks.getZulipRuntime.mockReturnValue(runtime);
-    mocks.createReplyPrefixOptions.mockReturnValue({ onModelSelected: undefined });
+    mocks.createChannelReplyPipeline.mockReturnValue({ onModelSelected: vi.fn() });
 
     mocks.resolveZulipAccount.mockReturnValue({
       accountId: "default",

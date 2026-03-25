@@ -10,7 +10,7 @@ export {
 export { monitorZulipProvider } from "./src/zulip/monitor.js";
 export { probeZulip } from "./src/zulip/probe.js";
 export { sendZulipStreamMessage, sendZulipDirectMessage } from "./src/zulip/send.js";
-export { sendZulipTypingStart, sendZulipTypingStop } from "./src/zulip/typing.js";
+export { sendZulipDirectTypingStart, sendZulipDirectTypingStop, sendZulipStreamTypingStart, sendZulipStreamTypingStop } from "./src/zulip/typing.js";
 export { setZulipPresence } from "./src/zulip/presence.js";
 export { getZulipRuntime, setZulipRuntime } from "./src/runtime.js";
 export { registerZulipSubagentHooks } from "./src/subagent-hooks.js";
