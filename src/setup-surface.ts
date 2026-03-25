@@ -127,17 +127,24 @@ export const zulipSetupWizard: ChannelSetupWizard = {
       helpLines: ["Enter the Zulip streams you want the bot to monitor, separated by commas."],
       currentValue: ({ cfg, accountId }) => {
         const account = resolveZulipAccount({ cfg, accountId });
-        return account.streams?.length ? account.streams.join(", ") : undefined;
+        return account.streams?.length
+          ? account.streams.map((s) => s.streamId).join(", ")
+          : undefined;
       },
       confirmCurrentValue: true,
       keepPrompt: (value) => `Streams already configured: ${value}. Keep them?`,
       validate: ({ value }) => (value?.trim() ? undefined : "At least one stream is required"),
       normalizeValue: ({ value }) => value,
       applySet: ({ cfg, accountId, value }) => {
-        const streams = value
+        const streamNames = value
           .split(",")
-          .map((s) => s.trim())
+          .map((s: string) => s.trim())
           .filter(Boolean);
+        // Build Record<streamId, {}> format
+        const streams: Record<string, Record<string, never>> = {};
+        for (const name of streamNames) {
+          streams[name] = {};
+        }
         const channels = cfg.channels as Record<string, any> | undefined;
         const zulipSection = channels?.zulip ?? {};
         if (accountId === DEFAULT_ACCOUNT_ID) {

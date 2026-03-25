@@ -13,7 +13,7 @@ vi.mock("./zulip/accounts.js", () => ({
     baseUrl: "https://zulip.example",
     email: "bot@test.com",
     apiKey: "test-key",
-    streams: ["general"],
+    streams: [{ streamId: "general", streamPolicy: "open" as const, requireMention: true, allowFrom: [] }],
   })),
 }));
 

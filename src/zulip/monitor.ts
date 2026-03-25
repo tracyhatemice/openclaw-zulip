@@ -53,6 +53,7 @@ import { sendZulipDirectMessage, sendZulipGroupDirectMessage, sendZulipStreamMes
 import { resolveZulipDmAccess, resolveZulipGroupDmAccess, resolveZulipStreamAccess } from "./dm-access.js";
 import { sendZulipDirectTypingStart, sendZulipDirectTypingStop } from "./typing.js";
 import { formatZulipDmTarget, formatZulipGroupDmTarget } from "./targets.js";
+import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
 import { ToolProgressAccumulator } from "./tool-progress.js";
 import { sendZulipStreamTypingStart, sendZulipStreamTypingStop } from "./typing.js";
 import { downloadZulipUploads, resolveOutboundMedia, uploadZulipFile } from "./uploads.js";
@@ -990,6 +991,12 @@ export async function monitorZulipProvider(
     );
   }
 
+  const pairing = createChannelPairingController({
+    core,
+    channel: "zulip",
+    accountId: account.accountId,
+  });
+
   const auth = buildAuth(account);
   const abortController = new AbortController();
   const abortSignal = abortController.signal;
@@ -1410,11 +1417,13 @@ export async function monitorZulipProvider(
 
       // --- DM/Group-DM access control ---
       if (prepared.kind === "dm" || prepared.kind === "group-dm") {
-        const dmPolicy = account.config.dm?.policy ?? "pairing";
+        const dmPolicyValue = account.config.dm?.policy ?? "pairing";
         const dmAllowFrom = account.config.dm?.allowFrom ?? [];
+        const storeAllowFrom = await pairing.readAllowFromStore();
         const dmAccess = resolveZulipDmAccess({
-          dmPolicy,
+          dmPolicy: dmPolicyValue,
           configuredAllowFrom: dmAllowFrom,
+          storeAllowFrom,
           senderId: msg.sender_id,
         });
 
@@ -1429,16 +1438,27 @@ export async function monitorZulipProvider(
           }
         } else {
           if (dmAccess.decision === "pairing") {
-            // Issue pairing challenge via DM
+            // Issue pairing challenge via SDK pairing system
             try {
-              const code = crypto.randomBytes(3).toString("hex").toUpperCase();
-              await sendZulipDirectMessage({
-                auth,
-                to: msg.sender_id,
-                content: `🔑 Your pairing code is: **${code}**\n\nTo approve, run the pairing approval command with this code.`,
-                abortSignal,
+              await pairing.issueChallenge({
+                senderId: String(msg.sender_id),
+                senderIdLine: `Zulip user ID: ${msg.sender_id}`,
+                meta: { name: msg.sender_full_name?.trim() || String(msg.sender_id) },
+                sendPairingReply: async (text) => {
+                  await sendZulipDirectMessage({
+                    auth,
+                    to: msg.sender_id,
+                    content: text,
+                    abortSignal,
+                  });
+                },
+                onCreated: ({ code }) => {
+                  logger.debug?.(`[zulip:${account.accountId}] pairing challenge issued for user ${msg.sender_id}, code=${code}`);
+                },
+                onReplyError: (err) => {
+                  logger.debug?.(`[zulip:${account.accountId}] pairing reply failed: ${String(err)}`);
+                },
               });
-              logger.debug?.(`[zulip:${account.accountId}] sent pairing challenge to user ${msg.sender_id}`);
             } catch (err) {
               logger.debug?.(`[zulip:${account.accountId}] pairing challenge failed: ${String(err)}`);
             }
