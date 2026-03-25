@@ -49,7 +49,10 @@ import {
   stopReactionButtonSessionCleanup,
 } from "./reaction-buttons.js";
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
-import { sendZulipStreamMessage } from "./send.js";
+import { sendZulipDirectMessage, sendZulipGroupDirectMessage, sendZulipStreamMessage } from "./send.js";
+import { resolveZulipDmAccess, resolveZulipGroupDmAccess, resolveZulipStreamAccess } from "./dm-access.js";
+import { sendZulipDirectTypingStart, sendZulipDirectTypingStop } from "./typing.js";
+import { formatZulipDmTarget, formatZulipGroupDmTarget } from "./targets.js";
 import { ToolProgressAccumulator } from "./tool-progress.js";
 import { sendZulipStreamTypingStart, sendZulipStreamTypingStop } from "./typing.js";
 import { downloadZulipUploads, resolveOutboundMedia, uploadZulipFile } from "./uploads.js";
@@ -73,19 +76,46 @@ type ZulipRegisterResponse = {
   last_event_id?: number;
 };
 
+type ZulipDmRecipient = {
+  id: number;
+  email: string;
+  full_name?: string;
+};
+
 type ZulipEventMessage = {
   id: number;
   type: string;
   sender_id: number;
   sender_full_name?: string;
   sender_email?: string;
-  display_recipient?: string;
+  /** String for stream messages, array of recipients for DMs. */
+  display_recipient?: string | ZulipDmRecipient[];
   stream_id?: number;
   subject?: string;
   content?: string;
   content_type?: string;
   timestamp?: number;
 };
+
+type ZulipMessageKind = "stream" | "dm" | "group-dm";
+
+function classifyZulipMessage(msg: ZulipEventMessage, botUserId: number): {
+  kind: ZulipMessageKind;
+  dmRecipients?: ZulipDmRecipient[];
+} {
+  if (msg.type === "stream") {
+    return { kind: "stream" };
+  }
+  // type === "direct" or "private" — both are DMs
+  if (!Array.isArray(msg.display_recipient)) {
+    return { kind: "dm" };
+  }
+  const recipients = msg.display_recipient.filter((r) => r.id !== botUserId);
+  if (recipients.length <= 1) {
+    return { kind: "dm", dmRecipients: msg.display_recipient };
+  }
+  return { kind: "group-dm", dmRecipients: msg.display_recipient };
+}
 
 type ZulipReactionEvent = {
   id?: number;
@@ -159,8 +189,13 @@ type ZulipTraceContext = {
 type PreparedZulipMessage = {
   msg: ZulipEventMessage;
   source: ZulipMessageSource;
+  kind: ZulipMessageKind;
+  /** Stream name (only for stream messages). */
   stream: string;
+  /** Topic (only for stream messages). */
   topic: string;
+  /** DM recipients (only for dm/group-dm messages). */
+  dmRecipients?: ZulipDmRecipient[];
   content: string;
   isRecovery: boolean;
   queuedReactionStarted: boolean;
@@ -570,10 +605,14 @@ async function fetchZulipSubscriptions(
 async function registerQueue(params: {
   auth: ZulipAuth;
   stream: string;
+  isDmQueue?: boolean;
   abortSignal?: AbortSignal;
 }): Promise<{ queueId: string; lastEventId: number }> {
   const core = getZulipRuntime();
-  const narrow = buildZulipRegisterNarrow(params.stream);
+  const entry: import("./queue-plan.js").ZulipQueuePlanEntry = params.isDmQueue
+    ? { kind: "dm" }
+    : { kind: "stream", stream: params.stream };
+  const narrow = buildZulipRegisterNarrow(entry);
   const res = await zulipRequest<ZulipRegisterResponse>({
     auth: params.auth,
     method: "POST",
@@ -653,55 +692,12 @@ async function pollEvents(params: {
 function shouldIgnoreMessage(params: {
   message: ZulipEventMessage;
   botUserId: number;
-  streams: string[];
 }): { ignore: boolean; reason?: string } {
   const msg = params.message;
   if (msg.sender_id === params.botUserId) {
     return { ignore: true, reason: "self" };
   }
-  if (msg.type !== "stream") {
-    return { ignore: true, reason: "dm" };
-  }
-  const stream = normalizeStreamName(msg.display_recipient);
-  if (!stream) {
-    return { ignore: true, reason: "missing-stream" };
-  }
-  if (params.streams.length > 0 && !params.streams.includes(stream)) {
-    return { ignore: true, reason: "not-allowed-stream" };
-  }
   return { ignore: false };
-}
-
-/**
- * Send a one-time "I only work in streams" reply to DM senders.
- * Uses a Set to avoid spamming the same sender repeatedly.
- */
-async function replyToDm(params: {
-  auth: ZulipAuth;
-  senderId: number;
-  dmNotifiedSenders: Set<number>;
-  log?: (message: string) => void;
-}): Promise<void> {
-  if (params.dmNotifiedSenders.has(params.senderId)) {
-    return;
-  }
-  params.dmNotifiedSenders.add(params.senderId);
-  try {
-    await zulipRequest({
-      auth: params.auth,
-      method: "POST",
-      path: "/api/v1/messages",
-      form: {
-        type: "direct",
-        to: JSON.stringify([params.senderId]),
-        content:
-          "👋 I only work in Zulip streams — mention me in a stream to chat! DMs are not supported.",
-      },
-    });
-    params.log?.(`[zulip] sent DM redirect to user ${params.senderId}`);
-  } catch (err) {
-    params.log?.(`[zulip] failed to send DM redirect: ${String(err)}`);
-  }
 }
 
 async function bestEffortReaction(params: {
@@ -986,9 +982,11 @@ export async function monitorZulipProvider(
   if (!account.baseUrl || !account.email || !account.apiKey) {
     throw new Error(`Zulip credentials missing for account "${account.accountId}"`);
   }
-  if (!account.streams.length) {
+  const dmPolicy = account.config.dm?.policy ?? "pairing";
+  const dmEnabled = dmPolicy !== "disabled";
+  if (!account.streams.length && !dmEnabled && !account.groupDmEnabled) {
     throw new Error(
-      `Zulip streams allowlist missing for account "${account.accountId}" (set channels.zulip.streams)`,
+      `Zulip account "${account.accountId}" has no streams configured and DMs are disabled`,
     );
   }
 
@@ -1036,8 +1034,6 @@ export async function monitorZulipProvider(
       return processedMessageWriteChain;
     };
 
-    // Track DM senders we've already notified to avoid spam.
-    const dmNotifiedSenders = new Set<number>();
     // Topic-rename alias map: composite keys "stream\0topicKey" -> canonical "stream\0topicKey".
     // Supports both same-stream renames and cross-stream topic moves.
     const topicAliases = new Map<string, string>();
@@ -1145,27 +1141,35 @@ export async function monitorZulipProvider(
         return undefined;
       }
 
-      const ignore = shouldIgnoreMessage({ message: msg, botUserId, streams: account.streams });
+      const ignore = shouldIgnoreMessage({ message: msg, botUserId });
       if (ignore.ignore) {
         return undefined;
       }
 
+      const classified = classifyZulipMessage(msg, botUserId);
       const isRecovery = Boolean(params.recoveryCheckpoint);
-      const stream = normalizeStreamName(msg.display_recipient);
-      const topic = normalizeTopic(msg.subject) || account.defaultTopic;
       const content = msg.content ?? "";
-      if (!stream) {
-        return undefined;
+
+      // For stream messages: resolve stream/topic
+      let stream = "";
+      let topic = "";
+      if (classified.kind === "stream") {
+        stream = normalizeStreamName(typeof msg.display_recipient === "string" ? msg.display_recipient : "");
+        topic = normalizeTopic(msg.subject) || account.defaultTopic;
+        if (!stream) {
+          return undefined;
+        }
+        if (
+          !isRecovery &&
+          isZulipMessageAlreadyProcessed({ state: processedMessageState, stream, messageId: msg.id })
+        ) {
+          logger.debug?.(
+            `[zulip:${account.accountId}] skip already-processed message ${msg.id} (${stream}) from durable watermark`,
+          );
+          return undefined;
+        }
       }
-      if (
-        !isRecovery &&
-        isZulipMessageAlreadyProcessed({ state: processedMessageState, stream, messageId: msg.id })
-      ) {
-        logger.debug?.(
-          `[zulip:${account.accountId}] skip already-processed message ${msg.id} (${stream}) from durable watermark`,
-        );
-        return undefined;
-      }
+
       if (!content.trim() && !content.includes("/user_uploads/")) {
         return undefined;
       }
@@ -1179,10 +1183,11 @@ export async function monitorZulipProvider(
         milestone: "event_seen",
         source: params.source,
         messageId: msg.id,
-        stream,
-        topic,
+        stream: stream || undefined,
+        topic: topic || undefined,
         activeHandlers: params.activeHandlers,
         waiterDepth: params.waiterDepth,
+        extra: { kind: classified.kind },
       });
 
       if (isRecovery) {
@@ -1191,27 +1196,198 @@ export async function monitorZulipProvider(
         );
       }
 
-      const queuedReaction = isRecovery
-        ? { queuedReactionStarted: false, reactionController: null }
-        : await sendQueuedReaction({
-            msg,
-            stream,
-            topic,
-            source: params.source,
-            trace,
-          });
+      // Only send queued reactions for stream messages (DMs don't have reactions on inbound)
+      const queuedReaction =
+        isRecovery || classified.kind !== "stream"
+          ? { queuedReactionStarted: false, reactionController: null }
+          : await sendQueuedReaction({
+              msg,
+              stream,
+              topic,
+              source: params.source,
+              trace,
+            });
 
       return {
         msg,
         source: params.source,
+        kind: classified.kind,
         stream,
         topic,
+        dmRecipients: classified.dmRecipients,
         content,
         isRecovery,
         queuedReactionStarted: queuedReaction.queuedReactionStarted,
         reactionController: queuedReaction.reactionController,
         trace,
       };
+    };
+
+    const handleDmMessage = async (prepared: PreparedZulipMessage) => {
+      const msg = prepared.msg;
+      const content = prepared.content;
+      const senderId = msg.sender_id;
+      const senderName = msg.sender_full_name?.trim() || msg.sender_email?.trim() || String(senderId);
+      const isDm = prepared.kind === "dm";
+
+      // Build DM target identifiers
+      const dmRecipients = (prepared.dmRecipients ?? []).filter((r) => r.id !== botUserId);
+      const recipientIds = dmRecipients.map((r) => r.id);
+
+      const to = isDm
+        ? formatZulipDmTarget(senderId)
+        : formatZulipGroupDmTarget(recipientIds);
+      const from = `zulip:${senderId}`;
+      const sessionKey = isDm
+        ? `zulip:${account.accountId}:dm:${senderId}`
+        : `zulip:${account.accountId}:group-dm:${recipientIds.toSorted().join(",")}`;
+
+      // Download inbound media
+      const inboundUploads = await downloadZulipUploads({
+        cfg,
+        accountId: account.accountId,
+        auth,
+        content,
+        abortSignal,
+      });
+      const mediaPaths = inboundUploads.map((entry) => entry.path);
+      const mediaUrls = inboundUploads.map((entry) => entry.url);
+      const mediaTypes = inboundUploads.map((entry) => entry.contentType ?? "");
+
+      let cleanedContent = content;
+      for (const upload of inboundUploads) {
+        cleanedContent = cleanedContent.replaceAll(upload.url, upload.placeholder);
+        try {
+          const urlObj = new URL(upload.url);
+          cleanedContent = cleanedContent.replaceAll(urlObj.pathname, upload.placeholder);
+        } catch {
+          // Ignore URL parse errors.
+        }
+      }
+
+      if (!cleanedContent.trim() && inboundUploads.length === 0) {
+        return;
+      }
+
+      const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "zulip",
+        accountId: account.accountId,
+        peer: { kind: "direct", id: String(senderId) },
+      });
+
+      const body = core.channel.reply.formatInboundEnvelope({
+        channel: "Zulip",
+        from: senderName,
+        timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
+        body: `${cleanedContent}\n[zulip message id: ${msg.id}]`,
+        chatType: "direct",
+        sender: { name: senderName, id: String(senderId) },
+      });
+
+      const ctxPayload = core.channel.reply.finalizeInboundContext({
+        Body: body,
+        RawBody: cleanedContent,
+        CommandBody: cleanedContent,
+        From: from,
+        To: to,
+        SessionKey: route.sessionKey ?? sessionKey,
+        AccountId: route.accountId,
+        ChatType: "direct",
+        Provider: "zulip" as const,
+        Surface: "zulip" as const,
+        SenderName: senderName,
+        SenderId: String(senderId),
+        MessageSid: String(msg.id),
+        OriginatingChannel: "zulip" as const,
+        OriginatingTo: to,
+        Timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
+        MediaPath: mediaPaths[0],
+        MediaUrl: mediaUrls[0],
+        MediaType: mediaTypes[0],
+        MediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
+        MediaUrls: mediaUrls.length > 0 ? mediaUrls : undefined,
+        MediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+        CommandAuthorized: true,
+      });
+
+      // DM typing indicator
+      const dmTypingRecipients = isDm ? [senderId] : recipientIds;
+      sendZulipDirectTypingStart({ auth, to: dmTypingRecipients, abortSignal }).catch(() => undefined);
+      const typingRefreshInterval = setInterval(() => {
+        sendZulipDirectTypingStart({ auth, to: dmTypingRecipients, abortSignal }).catch(() => undefined);
+      }, 10_000);
+
+      const { onModelSelected, ...prefixOptions } = createChannelReplyPipeline({
+        cfg,
+        agentId: route.agentId,
+        channel: "zulip",
+        accountId: account.accountId,
+      });
+
+      const { dispatcher, replyOptions, markDispatchIdle } =
+        core.channel.reply.createReplyDispatcherWithTyping({
+          ...prefixOptions,
+          humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
+          deliver: async (payload: ReplyPayload) => {
+            const text = payload.text?.trim();
+            if (!text) return;
+
+            const chunks = getZulipRuntime().channel.text.chunkMarkdownText(
+              text,
+              account.textChunkLimit,
+            );
+            for (const chunk of chunks.length > 0 ? chunks : [text]) {
+              if (!chunk) continue;
+              if (isDm) {
+                await sendZulipDirectMessage({ auth, to: senderId, content: chunk, abortSignal });
+              } else {
+                await sendZulipGroupDirectMessage({ auth, to: recipientIds, content: chunk, abortSignal });
+              }
+            }
+
+            // Handle media
+            if (payload.mediaUrl?.trim()) {
+              const resolved = await resolveOutboundMedia({ cfg, accountId: account.accountId, mediaUrl: payload.mediaUrl });
+              const uploadedUrl = await uploadZulipFile({ auth, buffer: resolved.buffer, contentType: resolved.contentType, filename: resolved.filename ?? "attachment" });
+              if (isDm) {
+                await sendZulipDirectMessage({ auth, to: senderId, content: uploadedUrl, abortSignal });
+              } else {
+                await sendZulipGroupDirectMessage({ auth, to: recipientIds, content: uploadedUrl, abortSignal });
+              }
+            }
+
+            opts.statusSink?.({ lastOutboundAt: Date.now() });
+            core.channel.activity.record({
+              channel: "zulip",
+              accountId: account.accountId,
+              direction: "outbound",
+              at: Date.now(),
+            });
+          },
+          onError: (err) => {
+            runtime.error?.(`zulip dm reply failed: ${String(err)}`);
+          },
+        });
+
+      try {
+        await core.channel.reply.dispatchReplyFromConfig({
+          ctx: ctxPayload,
+          cfg,
+          dispatcher,
+          replyOptions: {
+            ...replyOptions,
+            disableBlockStreaming: true,
+            onModelSelected,
+          },
+        });
+      } catch (err) {
+        runtime.error?.(`zulip dm dispatch failed: ${String(err)}`);
+      } finally {
+        clearInterval(typingRefreshInterval);
+        sendZulipDirectTypingStop({ auth, to: dmTypingRecipients, abortSignal }).catch(() => undefined);
+        markDispatchIdle?.();
+      }
     };
 
     const handleMessage = async (
@@ -1231,6 +1407,67 @@ export async function monitorZulipProvider(
         at: Date.now(),
       });
       opts.statusSink?.({ lastInboundAt: Date.now() });
+
+      // --- DM/Group-DM access control ---
+      if (prepared.kind === "dm" || prepared.kind === "group-dm") {
+        const dmPolicy = account.config.dm?.policy ?? "pairing";
+        const dmAllowFrom = account.config.dm?.allowFrom ?? [];
+        const dmAccess = resolveZulipDmAccess({
+          dmPolicy,
+          configuredAllowFrom: dmAllowFrom,
+          senderId: msg.sender_id,
+        });
+
+        if (prepared.kind === "group-dm") {
+          const groupDmResult = resolveZulipGroupDmAccess({
+            dmAccess,
+            groupDmEnabled: account.groupDmEnabled,
+          });
+          if (!groupDmResult.allowed) {
+            logger.debug?.(`[zulip:${account.accountId}] drop group-dm sender=${msg.sender_id}: ${groupDmResult.reason}`);
+            return;
+          }
+        } else {
+          if (dmAccess.decision === "pairing") {
+            // Issue pairing challenge via DM
+            try {
+              const code = crypto.randomBytes(3).toString("hex").toUpperCase();
+              await sendZulipDirectMessage({
+                auth,
+                to: msg.sender_id,
+                content: `🔑 Your pairing code is: **${code}**\n\nTo approve, run the pairing approval command with this code.`,
+                abortSignal,
+              });
+              logger.debug?.(`[zulip:${account.accountId}] sent pairing challenge to user ${msg.sender_id}`);
+            } catch (err) {
+              logger.debug?.(`[zulip:${account.accountId}] pairing challenge failed: ${String(err)}`);
+            }
+            return;
+          }
+          if (dmAccess.decision !== "allow") {
+            logger.debug?.(`[zulip:${account.accountId}] drop dm sender=${msg.sender_id}: ${dmAccess.reason}`);
+            return;
+          }
+        }
+
+        // DM is authorized — build envelope and dispatch
+        await handleDmMessage(prepared);
+        return;
+      }
+
+      // --- Stream access control ---
+      if (prepared.kind === "stream") {
+        const streamAccess = resolveZulipStreamAccess({
+          accountStreamPolicy: account.streamPolicy,
+          streamEntries: account.streams,
+          streamName: stream,
+          senderId: msg.sender_id,
+        });
+        if (!streamAccess.allowed) {
+          logger.debug?.(`[zulip:${account.accountId}] drop stream msg sender=${msg.sender_id} stream=${stream}: ${streamAccess.reason}`);
+          return;
+        }
+      }
 
       // Per-handler delivery signal: allows reply delivery to complete even if the monitor
       // is stopping (e.g. gateway restart). Without this, in-flight HTTP calls to Zulip get
@@ -1404,7 +1641,7 @@ export async function monitorZulipProvider(
         ConversationLabel: `${stream}#${topic}`,
         GroupSubject: stream,
         GroupChannel: `#${stream}`,
-        GroupSystemPrompt: account.alwaysReply
+        GroupSystemPrompt: !account.requireMention
           ? "Always reply to every message in this Zulip stream/topic. If a full response isn't needed, acknowledge briefly in 1 short sentence. To start a new topic, prefix your reply with: [[zulip_topic: <topic>]]"
           : undefined,
         Provider: "zulip" as const,
@@ -2095,7 +2332,7 @@ export async function monitorZulipProvider(
         return;
       }
 
-      if (account.streams.length > 0 && !account.streams.includes(source.stream)) {
+      if (account.streams.length > 0 && !account.streams.some((s) => s.streamId.toLowerCase() === source.stream.toLowerCase())) {
         return;
       }
 
@@ -2311,7 +2548,8 @@ export async function monitorZulipProvider(
           if (!queueId) {
             stage = "register";
             const wasReregistration = lastEventId !== -1;
-            const reg = await registerQueue({ auth, stream, abortSignal });
+            const isDmQueue = stream === "__dm__";
+            const reg = await registerQueue({ auth, stream, isDmQueue, abortSignal });
             queueId = reg.queueId;
             lastEventId = reg.lastEventId;
 
@@ -2329,7 +2567,7 @@ export async function monitorZulipProvider(
                     anchor: "newest",
                     num_before: 10,
                     num_after: 0,
-                    narrow: JSON.stringify([["stream", stream]]),
+                    narrow: isDmQueue ? JSON.stringify([["is", "dm"]]) : JSON.stringify([["stream", stream]]),
                     apply_markdown: "false",
                   },
                   abortSignal,
@@ -2397,7 +2635,8 @@ export async function monitorZulipProvider(
                 continue;
               }
               // Only track moves between streams we monitor.
-              if (!account.streams.includes(origName) || !account.streams.includes(newName)) {
+              const streamIds = account.streams.map((s) => s.streamId.toLowerCase());
+              if (!streamIds.includes(origName.toLowerCase()) || !streamIds.includes(newName.toLowerCase())) {
                 continue;
               }
               fromStream = origName;
@@ -2447,7 +2686,6 @@ export async function monitorZulipProvider(
             const ignore = shouldIgnoreMessage({
               message: msg,
               botUserId,
-              streams: account.streams,
             });
             logger.warn(
               `[zulip-debug][${account.accountId}] event msg id=${msg.id} topic="${msg.subject}" sender=${msg.sender_id} ignore=${ignore.ignore}${ignore.reason ? ` (${ignore.reason})` : ""}`,
@@ -2466,22 +2704,6 @@ export async function monitorZulipProvider(
               logger.debug?.(
                 `[zulip:${account.accountId}] reaction handling failed: ${String(err)}`,
               );
-            }
-          }
-
-          // Issue 2: handle DMs by sending a redirect notice.
-          const dmMessages = messages.filter(
-            (m) => m.type !== "stream" && m.sender_id !== botUserId,
-          );
-          for (const dm of dmMessages) {
-            if (typeof dm.sender_id === "number") {
-              logger.debug?.(`[zulip:${account.accountId}] ignoring DM from user ${dm.sender_id}`);
-              replyToDm({
-                auth,
-                senderId: dm.sender_id,
-                dmNotifiedSenders,
-                log: (m) => logger.debug?.(m),
-              }).catch(() => undefined);
             }
           }
 
@@ -2567,13 +2789,22 @@ export async function monitorZulipProvider(
 
     await replayPendingCheckpoints();
 
-    const plan = buildZulipQueuePlan(account.streams);
+    const streamNames = account.streams.map((s) => s.streamId);
+    const plan = buildZulipQueuePlan({ streams: streamNames, dmEnabled: dmEnabled || account.groupDmEnabled });
     if (plan.length === 0) {
       throw new Error(
-        `Zulip streams allowlist missing for account "${account.accountId}" (set channels.zulip.streams)`,
+        `Zulip account "${account.accountId}" has no streams configured and DMs are disabled`,
       );
     }
-    await Promise.all(plan.map((entry) => pollStreamQueue(entry.stream)));
+    await Promise.all(
+      plan.map((entry) => {
+        if (entry.kind === "stream") {
+          return pollStreamQueue(entry.stream);
+        }
+        // DM queue uses the same polling mechanism with a special "dm" stream key
+        return pollStreamQueue("__dm__");
+      }),
+    );
   };
 
   const done = run()

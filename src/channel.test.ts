@@ -28,7 +28,7 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
+          streams: { "marcel-ai": {} },
           defaultTopic: "general chat",
         },
       },
@@ -46,7 +46,7 @@ describe("zulipPlugin", () => {
     }
   });
 
-  it("defaults to alwaysReply (no mention requirement)", () => {
+  it("defaults to requireMention=true", () => {
     const cfg: OpenClawConfig = {
       channels: {
         zulip: {
@@ -54,7 +54,7 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
+          streams: { "marcel-ai": {} },
         },
       },
     };
@@ -62,7 +62,7 @@ describe("zulipPlugin", () => {
       cfg,
       groupId: "marcel-ai",
     });
-    expect(requireMention).toBe(false);
+    expect(requireMention).toBe(true);
   });
 
   it("defaults to clearing the onStart reaction", () => {
@@ -73,7 +73,7 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
+          streams: { "marcel-ai": {} },
         },
       },
     };
@@ -89,7 +89,7 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
+          streams: { "marcel-ai": {} },
           reactions: {
             clearOnFinish: false,
           },
@@ -108,7 +108,7 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
+          streams: { "marcel-ai": {} },
         },
       },
     };
@@ -127,7 +127,7 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
+          streams: { "marcel-ai": {} },
           reactions: {
             onStart: "eyes",
             onSuccess: "check",
@@ -158,7 +158,7 @@ describe("zulipPlugin", () => {
     expect(account.reactions.workflow.stages.failure).toBe("warning");
   });
 
-  it("can require mentions when alwaysReply=false", () => {
+  it("can disable mentions when requireMention=false", () => {
     const cfg: OpenClawConfig = {
       channels: {
         zulip: {
@@ -166,8 +166,8 @@ describe("zulipPlugin", () => {
           baseUrl: "https://zulip.example.com",
           email: "bot@example.com",
           apiKey: "key",
-          streams: ["marcel-ai"],
-          alwaysReply: false,
+          streams: { "marcel-ai": {} },
+          requireMention: false,
         },
       },
     };
@@ -175,6 +175,6 @@ describe("zulipPlugin", () => {
       cfg,
       groupId: "marcel-ai",
     });
-    expect(requireMention).toBe(true);
+    expect(requireMention).toBe(false);
   });
 });

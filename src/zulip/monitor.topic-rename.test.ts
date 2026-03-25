@@ -201,9 +201,12 @@ function createHarness(events: ZulipQueueEvent[]) {
     baseUrl: "https://zulip.example.com",
     email: "bot@zulip.example.com",
     apiKey: "api-key",
-    streams: ["marcel"],
+    streams: [{ streamId: "marcel", streamPolicy: "open" as const, requireMention: false, allowFrom: [] }],
     defaultTopic: "general",
-    alwaysReply: true,
+    streamPolicy: "open" as const,
+    requireMention: false,
+    groupDmEnabled: false,
+    config: {},
     textChunkLimit: 10_000,
     reactions: {
       enabled: false,
@@ -214,7 +217,7 @@ function createHarness(events: ZulipQueueEvent[]) {
     },
   });
 
-  mocks.buildZulipQueuePlan.mockReturnValue([{ stream: "marcel" }]);
+  mocks.buildZulipQueuePlan.mockReturnValue([{ kind: "stream", stream: "marcel" }]);
   mocks.buildZulipRegisterNarrow.mockReturnValue(JSON.stringify([["stream", "marcel"]]));
   mocks.downloadZulipUploads.mockResolvedValue([]);
   mocks.resolveOutboundMedia.mockResolvedValue({

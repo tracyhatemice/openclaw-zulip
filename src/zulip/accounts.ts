@@ -1,6 +1,12 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/core";
-import type { ZulipAccountConfig, ZulipReactionConfig, ZulipTopicBindingsConfig } from "../types.js";
+import type {
+  ZulipAccountConfig,
+  ZulipReactionConfig,
+  ZulipStreamEntryConfig,
+  ZulipStreamPolicy,
+  ZulipTopicBindingsConfig,
+} from "../types.js";
 import { normalizeEmojiName, normalizeStreamName, normalizeTopic } from "./normalize.js";
 
 export type ZulipTokenSource = "env" | "config" | "none";
@@ -46,6 +52,13 @@ export type ResolvedZulipReactions = {
   genericCallback: ResolvedZulipGenericReactionCallback;
 };
 
+export type ResolvedZulipStreamEntry = {
+  streamId: string;
+  streamPolicy: ZulipStreamPolicy;
+  requireMention: boolean;
+  allowFrom: string[];
+};
+
 export type ResolvedZulipAccount = {
   accountId: string;
   enabled: boolean;
@@ -56,17 +69,18 @@ export type ResolvedZulipAccount = {
   baseUrlSource: ZulipBaseUrlSource;
   emailSource: ZulipEmailSource;
   apiKeySource: ZulipTokenSource;
-  streams: string[];
-  alwaysReply: boolean;
+  streamPolicy: ZulipStreamPolicy;
+  streams: ResolvedZulipStreamEntry[];
+  requireMention: boolean;
   defaultTopic: string;
   reactions: ResolvedZulipReactions;
   textChunkLimit: number;
+  groupDmEnabled: boolean;
   config: ZulipAccountConfig;
 };
 
 const DEFAULT_TOPIC = "general chat";
 const DEFAULT_TEXT_CHUNK_LIMIT = 10_000;
-const DEFAULT_ALWAYS_REPLY = true;
 
 const DEFAULT_REACTIONS: ResolvedZulipReactions = {
   enabled: true,
@@ -135,9 +149,29 @@ function mergeZulipAccountConfig(cfg: OpenClawConfig, accountId: string): ZulipA
   return { ...base, ...account };
 }
 
-function normalizeStreamAllowlist(streams?: string[]): string[] {
-  const normalized = (streams ?? []).map((entry) => normalizeStreamName(entry)).filter(Boolean);
-  return Array.from(new Set(normalized));
+function normalizeAllowFromEntries(entries?: (string | number)[]): string[] {
+  if (!entries) return [];
+  return entries.map((e) => String(e).trim()).filter(Boolean);
+}
+
+function resolveStreamEntries(
+  raw: Record<string, ZulipStreamEntryConfig> | undefined,
+  accountStreamPolicy: ZulipStreamPolicy,
+  accountRequireMention: boolean,
+): ResolvedZulipStreamEntry[] {
+  if (!raw || typeof raw !== "object") return [];
+  return Object.entries(raw)
+    .filter(([key]) => key.trim())
+    .map(([key, entry]) => {
+      const streamId = normalizeStreamName(key) || key.trim();
+      const cfg = entry ?? {};
+      return {
+        streamId,
+        streamPolicy: cfg.streamPolicy ?? accountStreamPolicy,
+        requireMention: cfg.requireMention ?? accountRequireMention,
+        allowFrom: normalizeAllowFromEntries(cfg.allowFrom),
+      };
+    });
 }
 
 function resolveWorkflowMinTransitionMs(raw?: number): number {
@@ -208,12 +242,14 @@ export function resolveZulipAccount(params: {
   const emailSource: ZulipEmailSource = configEmail ? "config" : envEmail ? "env" : "none";
   const apiKeySource: ZulipTokenSource = configKey ? "config" : envKey ? "env" : "none";
 
-  const streams = normalizeStreamAllowlist(merged.streams);
-  const alwaysReply = merged.alwaysReply !== false && DEFAULT_ALWAYS_REPLY;
+  const streamPolicy: ZulipStreamPolicy = merged.streamPolicy ?? "allowlist";
+  const requireMention = merged.requireMention !== false;
+  const streams = resolveStreamEntries(merged.streams, streamPolicy, requireMention);
   const defaultTopic = normalizeTopic(merged.defaultTopic) || DEFAULT_TOPIC;
   const reactions = resolveReactions(merged.reactions);
   const textChunkLimit =
     typeof merged.textChunkLimit === "number" ? merged.textChunkLimit : DEFAULT_TEXT_CHUNK_LIMIT;
+  const groupDmEnabled = merged.dm?.groupDm?.enabled === true;
 
   return {
     accountId,
@@ -225,11 +261,13 @@ export function resolveZulipAccount(params: {
     baseUrlSource,
     emailSource,
     apiKeySource,
+    streamPolicy,
     streams,
-    alwaysReply,
+    requireMention,
     defaultTopic,
     reactions,
     textChunkLimit,
+    groupDmEnabled,
     config: merged,
   };
 }

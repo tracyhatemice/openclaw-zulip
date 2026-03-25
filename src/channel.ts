@@ -26,7 +26,11 @@ import {
 import { zulipMessageActions } from "./zulip/actions.js";
 import { monitorZulipProvider } from "./zulip/monitor.js";
 import { normalizeStreamName, normalizeTopic } from "./zulip/normalize.js";
-import { sendZulipDirectMessage, sendZulipStreamMessage } from "./zulip/send.js";
+import {
+  sendZulipDirectMessage,
+  sendZulipGroupDirectMessage,
+  sendZulipStreamMessage,
+} from "./zulip/send.js";
 import { parseZulipTarget } from "./zulip/targets.js";
 import { collectZulipStatusIssues } from "./status-issues.js";
 import { resolveOutboundMedia, uploadZulipFile } from "./zulip/uploads.js";
@@ -36,24 +40,25 @@ const activeProviders = new Map<string, { stop: () => void }>();
 const collectZulipSecurityWarnings =
   createOpenProviderConfiguredRouteWarningCollector<ResolvedZulipAccount>({
     providerConfigPresent: (cfg) => cfg.channels?.zulip !== undefined,
-    resolveGroupPolicy: (account) => (account.alwaysReply ? "open" : null),
+    resolveGroupPolicy: (account) =>
+      account.streamPolicy === "open" ? "open" : account.streamPolicy === "disabled" ? null : "allowlist",
     resolveRouteAllowlistConfigured: (account) => account.streams.length > 0,
     configureRouteAllowlist: {
       surface: "Zulip streams",
       openScope: "any stream the bot can access",
-      groupPolicyPath: "channels.zulip.alwaysReply",
+      groupPolicyPath: "channels.zulip.streamPolicy",
       routeAllowlistPath: "channels.zulip.streams",
     },
     missingRouteAllowlist: {
       surface: "Zulip streams",
       openBehavior: "with no stream allowlist; any stream can trigger (mention-gated)",
-      remediation: "Set channels.zulip.streams to a list of stream names to limit access",
+      remediation: "Set channels.zulip.streams to a record of stream entries to limit access",
     },
   });
 
 const resolveZulipDmPolicy = createScopedDmSecurityResolver<ResolvedZulipAccount>({
   channelKey: "zulip",
-  resolvePolicy: (account) => account.config.dm?.policy,
+  resolvePolicy: (account) => account.config.dm?.policy ?? "pairing",
   resolveAllowFrom: (account) => account.config.dm?.allowFrom,
   allowFromPathSuffix: "dm.",
   normalizeEntry: (raw) => raw.trim().replace(/^(zulip|user):/i, ""),
@@ -98,7 +103,8 @@ export const zulipPlugin = createChatChannelPlugin({
     },
     agentPrompt: {
       messageToolHints: () => [
-        "- Zulip targets use `stream:<name>#<topic>` format. Topic is optional (defaults to account's defaultTopic).",
+        "- Zulip stream targets use `stream:<name>#<topic>` format. Topic is optional (defaults to account's defaultTopic).",
+        "- DM targets use `user:<senderId>` format. Group DM targets use `group-dm:<id1>,<id2>` format.",
         "- Use `sendWithReactions` action to present numbered choices via emoji reactions (workaround for no interactive buttons).",
         "- Zulip supports spoiler blocks with ` ```spoiler title\\n...\\n``` ` syntax for collapsible content.",
         "- Mention users with `@**Full Name**` syntax. Use `@**all**` or `@**everyone**` for wildcard mentions.",
@@ -117,8 +123,8 @@ export const zulipPlugin = createChatChannelPlugin({
         return trimmed;
       },
       targetResolver: {
-        looksLikeId: (raw) => /^zulip:stream:|^stream:/i.test(raw.trim()),
-        hint: "stream:<streamName>#<topic?>",
+        looksLikeId: (raw) => /^(zulip:)?(stream:|user:|dm:|group-dm:)/i.test(raw.trim()),
+        hint: "stream:<name>#<topic?> or user:<senderId>",
       },
       formatTargetDisplay: ({ target }) => target,
     },
@@ -291,9 +297,15 @@ export const zulipPlugin = createChatChannelPlugin({
           return {
             ok: false,
             error: new Error(
-              "Delivering to Zulip requires --target stream:<streamName>#<topic?> (topic optional).",
+              "Delivering to Zulip requires --target stream:<name>#<topic?> or user:<senderId>.",
             ),
           };
+        }
+        if (parsed.kind === "dm") {
+          return { ok: true, to: `user:${parsed.user}` };
+        }
+        if (parsed.kind === "group-dm") {
+          return { ok: true, to: `group-dm:${parsed.users.join(",")}` };
         }
         const account = cfg ? resolveZulipAccount({ cfg, accountId }) : null;
         const stream = normalizeStreamName(parsed.stream);
@@ -312,13 +324,21 @@ export const zulipPlugin = createChatChannelPlugin({
         if (!parsed) {
           throw new Error(`Invalid Zulip target: ${to}`);
         }
-        const stream = normalizeStreamName(parsed.stream);
-        const topic = normalizeTopic(parsed.topic) || account.defaultTopic;
         const auth = {
           baseUrl: account.baseUrl ?? "",
           email: account.email ?? "",
           apiKey: account.apiKey ?? "",
         };
+        if (parsed.kind === "dm") {
+          const result = await sendZulipDirectMessage({ auth, to: parsed.user, content: text });
+          return { messageId: String(result.id ?? "unknown") };
+        }
+        if (parsed.kind === "group-dm") {
+          const result = await sendZulipGroupDirectMessage({ auth, to: parsed.users, content: text });
+          return { messageId: String(result.id ?? "unknown") };
+        }
+        const stream = normalizeStreamName(parsed.stream);
+        const topic = normalizeTopic(parsed.topic) || account.defaultTopic;
         const result = await (
           await import("./zulip/send.js")
         ).sendZulipStreamMessage({
@@ -338,11 +358,6 @@ export const zulipPlugin = createChatChannelPlugin({
         if (!parsed) {
           throw new Error(`Invalid Zulip target: ${to}`);
         }
-        const stream = normalizeStreamName(parsed.stream);
-        const topic = normalizeTopic(parsed.topic) || account.defaultTopic;
-        if (!stream) {
-          throw new Error("Missing Zulip stream name");
-        }
         const auth = {
           baseUrl: account.baseUrl ?? "",
           email: account.email ?? "",
@@ -360,6 +375,25 @@ export const zulipPlugin = createChatChannelPlugin({
           contentType: resolved.contentType,
           filename: resolved.filename ?? "attachment",
         });
+
+        // DM media delivery
+        if (parsed.kind === "dm") {
+          const content = (text ?? "").trim() ? `${(text ?? "").trim()}\n\n${uploadedUrl}` : uploadedUrl;
+          const res = await sendZulipDirectMessage({ auth, to: parsed.user, content });
+          return { messageId: String(res.id ?? "unknown") };
+        }
+        if (parsed.kind === "group-dm") {
+          const content = (text ?? "").trim() ? `${(text ?? "").trim()}\n\n${uploadedUrl}` : uploadedUrl;
+          const res = await sendZulipGroupDirectMessage({ auth, to: parsed.users, content });
+          return { messageId: String(res.id ?? "unknown") };
+        }
+
+        // Stream media delivery
+        const stream = normalizeStreamName(parsed.stream);
+        const topic = normalizeTopic(parsed.topic) || account.defaultTopic;
+        if (!stream) {
+          throw new Error("Missing Zulip stream name");
+        }
 
         const caption = (text ?? "").trim();
         if (caption.length > account.textChunkLimit) {

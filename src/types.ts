@@ -56,11 +56,29 @@ export type ZulipReactionConfig = {
 
 export type ZulipDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
 
+export type ZulipStreamPolicy = "open" | "allowlist" | "disabled";
+
+export type ZulipGroupDmConfig = {
+  /** Enable group DM (huddle) support. Default: false. */
+  enabled?: boolean;
+};
+
 export type ZulipDmConfig = {
-  /** DM policy: "open" (allow all), "pairing" (require approval), "allowlist" (only listed users), "disabled" (no DMs). Default: "disabled". */
+  /** DM policy. Default: "pairing". */
   policy?: ZulipDmPolicy;
-  /** User IDs or emails allowed to DM the bot (when policy is "allowlist"). */
-  allowFrom?: string[];
+  /** Sender IDs allowed to DM (integers). "open" requires ["*"]. */
+  allowFrom?: (string | number)[];
+  /** Group DM config. Inherits DM policy for sender auth. */
+  groupDm?: ZulipGroupDmConfig;
+};
+
+export type ZulipStreamEntryConfig = {
+  /** Per-stream policy override. Inherits from account-level streamPolicy if unset. */
+  streamPolicy?: ZulipStreamPolicy;
+  /** Per-stream requireMention override. Default: true. */
+  requireMention?: boolean;
+  /** Per-stream sender allowlist (sender_id integers). */
+  allowFrom?: (string | number)[];
 };
 
 export type ZulipTopicBindingsConfig = {
@@ -79,16 +97,10 @@ export type ZulipAccountConfig = {
   email?: string;
   apiKey?: string;
 
-  /** Stream allowlist to monitor (names; without leading "#"). */
-  streams?: string[];
-
-  /**
-   * Reply to every message in monitored streams/topics (default: true).
-   *
-   * When false, OpenClaw may act "trigger-only" depending on global group policy
-   * and mention detection.
-   */
-  alwaysReply?: boolean;
+  /** Stream access policy. Default: "allowlist". */
+  streamPolicy?: ZulipStreamPolicy;
+  /** Stream allowlist. Record<streamId|"*", StreamEntryConfig>. */
+  streams?: Record<string, ZulipStreamEntryConfig>;
 
   /**
    * Default topic when target omits a topic.
@@ -111,9 +123,8 @@ export type ZulipAccountConfig = {
   mediaMaxMb?: number;
 
   /**
-   * Require @mention to respond in streams (default: false).
+   * Require @mention to respond in streams (default: true).
    * When true, the bot only replies when mentioned by name or @-syntax.
-   * If unset, derived from `alwaysReply` (default true -> requireMention false).
    */
   requireMention?: boolean;
 };

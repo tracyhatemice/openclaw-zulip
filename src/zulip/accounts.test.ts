@@ -169,23 +169,20 @@ describe("resolveZulipAccount", () => {
 
   it("normalizes stream names (strips #)", () => {
     const cfg = makeConfig({
-      accounts: { default: { streams: ["#general", "#random"] } },
+      accounts: { default: { streams: { "#general": {}, "#random": {} } } },
     });
     const result = resolveZulipAccount({ cfg, accountId: "default" });
-    expect(result.streams).toEqual(["general", "random"]);
+    expect(result.streams.map((s) => s.streamId)).toEqual(["general", "random"]);
   });
 
-  it("deduplicates streams", () => {
-    const cfg = makeConfig({
-      accounts: { default: { streams: ["general", "#general", "general"] } },
-    });
-    const result = resolveZulipAccount({ cfg, accountId: "default" });
-    expect(result.streams).toEqual(["general"]);
-  });
-
-  it("defaults alwaysReply to true", () => {
+  it("defaults streamPolicy to allowlist", () => {
     const result = resolveZulipAccount({ cfg: makeConfig() });
-    expect(result.alwaysReply).toBe(true);
+    expect(result.streamPolicy).toBe("allowlist");
+  });
+
+  it("defaults requireMention to true", () => {
+    const result = resolveZulipAccount({ cfg: makeConfig() });
+    expect(result.requireMention).toBe(true);
   });
 
   it("defaults defaultTopic to 'general chat'", () => {
@@ -197,11 +194,11 @@ describe("resolveZulipAccount", () => {
     const cfg = makeConfig({
       baseUrl: "https://base.zulip.org",
       email: "base@example.com",
-      streams: ["#base-stream"],
+      streams: { "#base-stream": {} },
       accounts: {
         default: {
           email: "override@example.com",
-          streams: ["#override-stream"],
+          streams: { "#override-stream": {} },
         },
       },
     });
@@ -211,7 +208,7 @@ describe("resolveZulipAccount", () => {
     // email overridden by account
     expect(result.email).toBe("override@example.com");
     // streams overridden by account
-    expect(result.streams).toEqual(["override-stream"]);
+    expect(result.streams.map((s) => s.streamId)).toEqual(["override-stream"]);
   });
 });
 

@@ -41,8 +41,8 @@ export async function listZulipDirectoryGroupsFromConfig(params: DirectoryConfig
     kind: "group",
     resolveAccount: (cfg, accountId) => resolveZulipDirectoryConfigAccount(cfg, accountId),
     resolveSources: (account) => {
-      const streams = account.config.streams ?? [];
-      return [streams];
+      const streams = account.config.streams ?? {};
+      return [Object.keys(streams)];
     },
     normalizeId: (raw) => {
       const cleaned = raw.trim().replace(/^(zulip|stream):/i, "");

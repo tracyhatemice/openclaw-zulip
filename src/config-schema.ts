@@ -40,10 +40,17 @@ const ReactionSchema = z
   })
   .strict();
 
+const GroupDmSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
 const DmSchema = z
   .object({
     policy: z.enum(["open", "pairing", "allowlist", "disabled"]).optional(),
-    allowFrom: z.array(z.string()).optional(),
+    allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
+    groupDm: GroupDmSchema.optional(),
   })
   .strict();
 
@@ -66,6 +73,14 @@ const ActionsSchema = z
   })
   .strict();
 
+const StreamEntrySchema = z
+  .object({
+    streamPolicy: z.enum(["open", "allowlist", "disabled"]).optional(),
+    requireMention: z.boolean().optional(),
+    allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
+  })
+  .strict();
+
 const ZulipAccountSchemaBase = z
   .object({
     name: z.string().optional(),
@@ -74,8 +89,9 @@ const ZulipAccountSchemaBase = z
     baseUrl: z.string().optional(),
     email: z.string().optional(),
     apiKey: z.string().optional(),
-    streams: z.array(z.string()).optional(),
-    alwaysReply: z.boolean().optional(),
+    streamPolicy: z.enum(["open", "allowlist", "disabled"]).optional(),
+    streams: z.record(z.string(), StreamEntrySchema.optional()).optional(),
+    requireMention: z.boolean().optional(),
     defaultTopic: z.string().optional(),
     dm: DmSchema.optional(),
     topicBindings: TopicBindingsSchema.optional(),

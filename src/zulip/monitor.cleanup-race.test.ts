@@ -200,9 +200,12 @@ describe("monitorZulipProvider cleanup race", () => {
       baseUrl: "https://zulip.example.com",
       email: "bot@zulip.example.com",
       apiKey: "api-key",
-      streams: ["marcel"],
+      streams: [{ streamId: "marcel", streamPolicy: "open" as const, requireMention: false, allowFrom: [] }],
       defaultTopic: "general",
-      alwaysReply: true,
+      streamPolicy: "open" as const,
+      requireMention: false,
+      groupDmEnabled: false,
+      config: {},
       textChunkLimit: 10_000,
       reactions: {
         enabled: false,
@@ -213,7 +216,7 @@ describe("monitorZulipProvider cleanup race", () => {
       },
     });
 
-    mocks.buildZulipQueuePlan.mockReturnValue([{ stream: "marcel" }]);
+    mocks.buildZulipQueuePlan.mockReturnValue([{ kind: "stream", stream: "marcel" }]);
     mocks.buildZulipRegisterNarrow.mockReturnValue(JSON.stringify([["stream", "marcel"]]));
 
     let eventsPollCount = 0;

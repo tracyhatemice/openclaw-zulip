@@ -9,7 +9,7 @@ import { normalizeTopic } from "./normalize.js";
 import { sendWithReactionButtons, type ReactionButtonOption } from "./reaction-buttons.js";
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
 import { sendZulipStreamMessage } from "./send.js";
-import { parseZulipTarget } from "./targets.js";
+import { parseZulipStreamTarget } from "./targets.js";
 import { uploadZulipFile, resolveOutboundMedia } from "./uploads.js";
 
 type ActionParams = Record<string, unknown>;
@@ -295,7 +295,7 @@ function requireStreamTarget(
   target: string;
 } {
   const target = requireString(params, "target");
-  const parsed = parseZulipTarget(target);
+  const parsed = parseZulipStreamTarget(target);
   if (!parsed) {
     throw new Error(`Invalid Zulip target: ${target}. Use stream:<name>#<topic>`);
   }
@@ -463,7 +463,7 @@ function resolveChannelStreamLookup(params: ActionParams): {
   streamId?: string | number;
 } {
   const target = optionalString(params, "target");
-  const parsedTarget = target ? parseZulipTarget(target) : null;
+  const parsedTarget = target ? parseZulipStreamTarget(target) : null;
   return {
     stream:
       parsedTarget?.stream ?? optionalString(params, "name") ?? optionalString(params, "stream"),
@@ -526,7 +526,7 @@ async function handleTopicList(params: ActionParams, cfg: unknown, accountId?: s
 
   let stream: string | undefined;
   if (target) {
-    const parsed = parseZulipTarget(target);
+    const parsed = parseZulipStreamTarget(target);
     stream = parsed ? normalizeStreamName(parsed.stream) : normalizeStreamName(target);
   } else if (streamName) {
     stream = normalizeStreamName(streamName);
@@ -631,7 +631,7 @@ async function handleSend(params: ActionParams, cfg: unknown, accountId?: string
   const message = optionalString(params, "message");
   const mediaUrl = optionalString(params, "media") ?? optionalString(params, "mediaUrl");
 
-  const parsed = parseZulipTarget(target);
+  const parsed = parseZulipStreamTarget(target);
   if (!parsed) {
     throw new Error(`Invalid Zulip target: ${target}. Use stream:<name>#<topic>`);
   }
@@ -674,7 +674,7 @@ async function handleSendWithReactions(
   const optionsRaw = params.options;
   const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 5 * 60 * 1000; // 5 minutes default
 
-  const parsed = parseZulipTarget(target);
+  const parsed = parseZulipStreamTarget(target);
   if (!parsed) {
     throw new Error(`Invalid Zulip target: ${target}. Use stream:<name>#<topic>`);
   }
