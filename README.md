@@ -19,7 +19,7 @@ rm -rf ~/.openclaw/extensions/zulip && cp ~/.openclaw/openclaw.json.nozulip ~/.o
 
 # install the Zulip plugin and switch to the Zulip config;
 # openclaw.json.zulip has the Zulip channel configured with "openclaw config" command.
-openclaw plugins install . ; cd ~/.openclaw/extensions/zulip ; npm install ; npm install openclaw@latest ; cp ~/.openclaw/openclaw.json.zulip ~/.openclaw/openclaw.json && openclaw gateway restart
+openclaw plugins install . ; cd ~/.openclaw/extensions/zulip ; npm install ; cd ; cp ~/.openclaw/openclaw.json.zulip ~/.openclaw/openclaw.json && openclaw gateway restart
 ```
 
 ## Upstream sync
