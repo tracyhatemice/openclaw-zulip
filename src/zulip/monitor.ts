@@ -1662,7 +1662,7 @@ export async function monitorZulipProvider(
         GroupSubject: stream,
         GroupChannel: `#${stream}`,
         GroupSystemPrompt: !account.requireMention
-          ? "Always reply to every message in this Zulip stream/topic. If a full response isn't needed, acknowledge briefly in 1 short sentence. To start a new topic, prefix your reply with: [[zulip_topic: <topic>]]"
+          ? "Always reply to every message in this Zulip stream/topic. If a full response isn't needed, acknowledge briefly in 1 short sentence. If you already sent your reply via the message tool, that counts as your reply. To start a new topic, prefix your reply with: [[zulip_topic: <topic>]]"
           : undefined,
         Provider: "zulip" as const,
         Surface: "zulip" as const,
