@@ -128,6 +128,13 @@ export const zulipPlugin = createChatChannelPlugin({
         hint: "stream:<name>#<topic?> or user:<senderId>",
       },
       formatTargetDisplay: ({ target }) => target,
+      inferTargetChatType: ({ to }) => {
+        const trimmed = (to ?? "").trim();
+        if (/^(zulip:)?(stream:|channel:)/i.test(trimmed)) return "channel";
+        if (/^(zulip:)?(user:|dm:)/i.test(trimmed)) return "direct";
+        if (/^(zulip:)?group-dm:/i.test(trimmed)) return "group";
+        return undefined;
+      },
     },
     actions: zulipMessageActions,
     bindings: {

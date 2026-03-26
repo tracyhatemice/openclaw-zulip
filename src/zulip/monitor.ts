@@ -434,6 +434,21 @@ function buildTopicKey(topic: string): string {
   return `${encoded.slice(0, 64)}~${digest}`;
 }
 
+/**
+ * Reverse a topic key produced by `buildTopicKey` back to its raw lowercase form.
+ * Truncated keys (containing `~`) cannot be reliably decoded, so they are returned as-is.
+ */
+function safeDecodeTopicKey(topicKey: string): string {
+  if (topicKey.includes("~")) {
+    return topicKey;
+  }
+  try {
+    return decodeURIComponent(topicKey);
+  } catch {
+    return topicKey;
+  }
+}
+
 function isZulipUpdateMessageEvent(event: ZulipEvent): event is ZulipUpdateMessageEvent {
   return event.type === "update_message";
 }
@@ -1607,14 +1622,18 @@ export async function monitorZulipProvider(
           stream,
           topic,
         });
+      // Embed the full stream:name#topic as the peer ID so the session key
+      // matches what the SDK's fallback outbound resolver produces.  This
+      // prevents a second "mirror" session from being created when the agent
+      // sends replies via the message tool.
+      const canonicalTopic = safeDecodeTopicKey(canonicalTopicKey);
       const route = core.channel.routing.resolveAgentRoute({
         cfg,
         channel: "zulip",
         accountId: account.accountId,
-        peer: { kind: "channel", id: canonicalStream },
+        peer: { kind: "channel", id: `stream:${canonicalStream}#${canonicalTopic}` },
       });
-      const baseSessionKey = route.sessionKey;
-      const sessionKey = `${baseSessionKey}:topic:${canonicalTopicKey}`;
+      const sessionKey = route.sessionKey;
       logTrace({
         milestone: "handler_start",
         source: prepared.source,

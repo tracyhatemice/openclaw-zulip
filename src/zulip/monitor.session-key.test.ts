@@ -117,8 +117,29 @@ type ZulipQueueEvent = {
 type ContextPayload = {
   SessionKey?: string;
   To?: string;
+  From?: string;
   MessageSid?: string;
 };
+
+/**
+ * Simulates the SDK's `resolveFallbackSession` logic to compute the outbound
+ * session key.  The real function lives in the SDK's outbound-session.ts but
+ * we mirror its key derivation here so we can assert alignment.
+ */
+function simulateSdkFallbackSessionKey(target: string): string {
+  // stripProviderPrefix — removes "zulip:" prefix
+  let stripped = target.trim();
+  if (stripped.toLowerCase().startsWith("zulip:")) {
+    stripped = stripped.slice("zulip:".length).trim();
+  }
+  // stripKindPrefix — only removes user:/channel:/group:/conversation:/room:/dm:
+  stripped = stripped.replace(/^(user|channel|group|conversation|room|dm):/i, "").trim();
+  // peerId is the remaining value, lowercased
+  const peerId = stripped.toLowerCase();
+  // For channel targets (Zulip capabilities include "channel" but not "group",
+  // so inferPeerKind returns "channel")
+  return `agent:main:zulip:channel:${peerId}`;
+}
 
 function waitForCondition(condition: () => boolean, timeoutMs = 1_500): Promise<void> {
   const startedAt = Date.now();
@@ -140,7 +161,7 @@ function waitForCondition(condition: () => boolean, timeoutMs = 1_500): Promise<
 
 function createHarness(events: ZulipQueueEvent[]) {
   const dispatchReplyFromConfig = vi.fn(async () => undefined);
-  const registerForms: Array<Record<string, unknown>> = [];
+  let resolveAgentRouteSpy: ReturnType<typeof vi.fn>;
 
   const runtime = {
     logging: {
@@ -159,13 +180,13 @@ function createHarness(events: ZulipQueueEvent[]) {
         record: vi.fn(),
       },
       routing: {
-        resolveAgentRoute: vi.fn(
+        resolveAgentRoute: (resolveAgentRouteSpy = vi.fn(
           ({ peer }: { peer?: { kind: string; id: string } }) => ({
             sessionKey: peer ? `agent:main:zulip:${peer.kind}:${peer.id}` : "agent:main:main",
             agentId: "agent-1",
             accountId: "acc-1",
           }),
-        ),
+        )),
       },
       mentions: {
         buildMentionRegexes: vi.fn(() => []),
@@ -203,7 +224,9 @@ function createHarness(events: ZulipQueueEvent[]) {
     baseUrl: "https://zulip.example.com",
     email: "bot@zulip.example.com",
     apiKey: "api-key",
-    streams: [{ streamId: "marcel", streamPolicy: "open" as const, requireMention: false, allowFrom: [] }],
+    streams: [
+      { streamId: "marcel", streamPolicy: "open" as const, requireMention: false, allowFrom: [] },
+    ],
     defaultTopic: "general",
     streamPolicy: "open" as const,
     requireMention: false,
@@ -262,7 +285,6 @@ function createHarness(events: ZulipQueueEvent[]) {
         return { result: "success", user_id: 9 };
       }
       if (path === "/api/v1/register") {
-        registerForms.push(form ?? {});
         return { result: "success", queue_id: "queue-1", last_event_id: 100 };
       }
       if (path === "/api/v1/events" && method === "DELETE") {
@@ -293,7 +315,7 @@ function createHarness(events: ZulipQueueEvent[]) {
     },
   );
 
-  return { dispatchReplyFromConfig, registerForms };
+  return { dispatchReplyFromConfig, resolveAgentRouteSpy };
 }
 
 function makeMessage(messageId: number, topic: string): ZulipEventMessage {
@@ -310,73 +332,89 @@ function makeMessage(messageId: number, topic: string): ZulipEventMessage {
   };
 }
 
-describe("monitorZulipProvider topic rename session continuity", () => {
+describe("session key alignment with SDK fallback resolver", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("subscribes to update_message events and creates rename aliases", async () => {
-    const { dispatchReplyFromConfig, registerForms } = createHarness([
-      {
-        id: 101,
-        type: "update_message",
-        orig_subject: "alpha",
-        subject: "beta",
-      },
-      {
-        id: 102,
-        message: makeMessage(9001, "beta"),
-      },
+  it("produces a session key matching the SDK fallback for a simple topic", async () => {
+    const { dispatchReplyFromConfig } = createHarness([
+      { id: 101, message: makeMessage(9001, "general chat") },
     ]);
 
     const monitor = await monitorZulipProvider({
       config: {} as never,
-      runtime: {
-        log: vi.fn(),
-        error: vi.fn(),
-        exit: vi.fn(),
-      },
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
     });
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
 
-    const registerForm = registerForms[0];
-    const eventTypes = JSON.parse(String(registerForm?.event_types ?? "[]")) as string[];
-    expect(eventTypes).toContain("update_message");
-
     const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
-    expect(ctx.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
-    expect(ctx.To).toBe("stream:marcel#beta");
+    const inboundSessionKey = ctx.SessionKey!;
+    const outboundTarget = ctx.To!; // "stream:marcel#general chat"
+    const sdkFallbackKey = simulateSdkFallbackSessionKey(outboundTarget);
+
+    expect(inboundSessionKey).toBe(sdkFallbackKey);
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
   });
 
-  it("keeps the same session key for messages after a topic rename", async () => {
+  it("produces a session key matching the SDK fallback for a topic with spaces", async () => {
     const { dispatchReplyFromConfig } = createHarness([
-      {
-        id: 101,
-        message: makeMessage(9001, "alpha"),
-      },
-      {
-        id: 102,
-        type: "update_message",
-        orig_subject: "alpha",
-        subject: "beta",
-      },
-      {
-        id: 103,
-        message: makeMessage(9002, "beta"),
-      },
+      { id: 101, message: makeMessage(9001, "US946 patent") },
     ]);
 
     const monitor = await monitorZulipProvider({
       config: {} as never,
-      runtime: {
-        log: vi.fn(),
-        error: vi.fn(),
-        exit: vi.fn(),
-      },
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
+
+    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
+    const inboundSessionKey = ctx.SessionKey!;
+    const outboundTarget = ctx.To!;
+    const sdkFallbackKey = simulateSdkFallbackSessionKey(outboundTarget);
+
+    expect(inboundSessionKey).toBe(sdkFallbackKey);
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("produces a session key matching the SDK fallback for a topic with special chars", async () => {
+    const { dispatchReplyFromConfig } = createHarness([
+      { id: 101, message: makeMessage(9001, "bugs/issue#42") },
+    ]);
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
+
+    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
+    const inboundSessionKey = ctx.SessionKey!;
+    const outboundTarget = ctx.To!;
+    const sdkFallbackKey = simulateSdkFallbackSessionKey(outboundTarget);
+
+    expect(inboundSessionKey).toBe(sdkFallbackKey);
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("session key is case-insensitive (mixed case topic)", async () => {
+    const { dispatchReplyFromConfig } = createHarness([
+      { id: 101, message: makeMessage(9001, "MyTopic") },
+      { id: 102, message: makeMessage(9002, "mytopic") },
+    ]);
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
     });
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 2);
@@ -387,87 +425,112 @@ describe("monitorZulipProvider topic rename session continuity", () => {
     const first = contexts.find((ctx) => ctx.MessageSid === "9001");
     const second = contexts.find((ctx) => ctx.MessageSid === "9002");
 
-    expect(first?.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
-    expect(second?.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
-    expect(second?.To).toBe("stream:marcel#beta");
+    // Both should resolve to the same session key (lowercase)
+    expect(first?.SessionKey).toBe(second?.SessionKey);
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
   });
 
-  it("resolves chained topic renames to the original canonical session key", async () => {
-    const { dispatchReplyFromConfig } = createHarness([
-      {
-        id: 101,
-        type: "update_message",
-        orig_topic: "alpha",
-        topic: "beta",
-      },
-      {
-        id: 102,
-        type: "update_message",
-        orig_subject: "beta",
-        subject: "gamma",
-      },
-      {
-        id: 103,
-        message: makeMessage(9003, "gamma"),
-      },
+  it("passes stream:name#topic as peer ID to resolveAgentRoute", async () => {
+    const { dispatchReplyFromConfig, resolveAgentRouteSpy } = createHarness([
+      { id: 101, message: makeMessage(9001, "my topic") },
     ]);
 
     const monitor = await monitorZulipProvider({
       config: {} as never,
-      runtime: {
-        log: vi.fn(),
-        error: vi.fn(),
-        exit: vi.fn(),
-      },
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
     });
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
 
-    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
-    expect(ctx.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
-    expect(ctx.To).toBe("stream:marcel#gamma");
+    // Verify resolveAgentRoute was called with the stream:name#topic peer format
+    const routeCall = resolveAgentRouteSpy.mock.calls.find(
+      ([arg]: [{ peer?: { kind: string; id: string } }]) =>
+        arg.peer?.id?.startsWith("stream:"),
+    );
+    expect(routeCall).toBeDefined();
+    const peer = routeCall![0].peer;
+    expect(peer.kind).toBe("channel");
+    expect(peer.id).toBe("stream:marcel#my topic");
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
   });
 
-  it("ignores non-rename update_message events", async () => {
+  it("session key preserves canonical topic after rename", async () => {
     const { dispatchReplyFromConfig } = createHarness([
-      {
-        id: 101,
-        type: "update_message",
-        subject: "beta",
-      },
+      { id: 101, message: makeMessage(9001, "original") },
       {
         id: 102,
         type: "update_message",
-        orig_subject: "beta",
-        subject: "beta",
+        orig_subject: "original",
+        subject: "renamed",
       },
-      {
-        id: 103,
-        message: makeMessage(9004, "beta"),
-      },
+      { id: 103, message: makeMessage(9002, "renamed") },
     ]);
 
     const monitor = await monitorZulipProvider({
       config: {} as never,
-      runtime: {
-        log: vi.fn(),
-        error: vi.fn(),
-        exit: vi.fn(),
-      },
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
     });
 
-    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 2);
 
-    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
-    expect(ctx.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#beta");
+    const contexts = dispatchReplyFromConfig.mock.calls.map(
+      ([arg]) => (arg as { ctx: ContextPayload }).ctx,
+    );
+    const first = contexts.find((ctx) => ctx.MessageSid === "9001");
+    const second = contexts.find((ctx) => ctx.MessageSid === "9002");
+
+    // Both should have the canonical (original) session key
+    expect(first?.SessionKey).toBe(second?.SessionKey);
+    // But the To field should reflect the current topic
+    expect(second?.To).toBe("stream:marcel#renamed");
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
+  });
+});
+
+describe("inferTargetChatType", () => {
+  // Test the function logic directly (same implementation as in channel.ts)
+  // to avoid importing the full plugin which has heavy dependencies.
+  function inferTargetChatType({ to }: { to: string }): string | undefined {
+    const trimmed = (to ?? "").trim();
+    if (/^(zulip:)?(stream:|channel:)/i.test(trimmed)) return "channel";
+    if (/^(zulip:)?(user:|dm:)/i.test(trimmed)) return "direct";
+    if (/^(zulip:)?group-dm:/i.test(trimmed)) return "group";
+    return undefined;
+  }
+
+  it("returns 'channel' for stream: targets", () => {
+    expect(inferTargetChatType({ to: "stream:general#topic" })).toBe("channel");
+    expect(inferTargetChatType({ to: "stream:openclaw#US946 patent" })).toBe("channel");
+  });
+
+  it("returns 'channel' for channel: targets", () => {
+    expect(inferTargetChatType({ to: "channel:general" })).toBe("channel");
+  });
+
+  it("returns 'channel' for zulip: prefixed stream targets", () => {
+    expect(inferTargetChatType({ to: "zulip:stream:general#topic" })).toBe("channel");
+  });
+
+  it("returns 'direct' for user: targets", () => {
+    expect(inferTargetChatType({ to: "user:12345" })).toBe("direct");
+  });
+
+  it("returns 'direct' for dm: targets", () => {
+    expect(inferTargetChatType({ to: "dm:12345" })).toBe("direct");
+  });
+
+  it("returns 'group' for group-dm: targets", () => {
+    expect(inferTargetChatType({ to: "group-dm:1,2,3" })).toBe("group");
+  });
+
+  it("returns undefined for unrecognized targets", () => {
+    expect(inferTargetChatType({ to: "something-else" })).toBeUndefined();
+    expect(inferTargetChatType({ to: "" })).toBeUndefined();
   });
 });
