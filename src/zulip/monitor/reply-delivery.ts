@@ -1,4 +1,5 @@
 import type { OpenClawConfig, ReplyPayload } from "openclaw/plugin-sdk";
+import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
 import { getZulipRuntime } from "../../runtime.js";
 import type { ResolvedZulipAccount } from "../accounts.js";
 import type { ZulipAuth } from "../client.js";
@@ -20,7 +21,7 @@ export async function deliverReply(params: {
 
   const topicDirective = extractZulipTopicDirective(params.payload.text ?? "");
   const topic = topicDirective.topic ?? params.topic;
-  const text = topicDirective.text;
+  const text = stripReasoningTagsFromText(topicDirective.text, { mode: "strict", trim: "both" });
   const mediaUrls = (params.payload.mediaUrls ?? []).filter(Boolean);
   const mediaUrl = params.payload.mediaUrl?.trim();
   if (mediaUrl) {

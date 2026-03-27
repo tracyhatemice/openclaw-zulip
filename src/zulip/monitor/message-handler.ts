@@ -1,5 +1,6 @@
 import type { ReplyPayload } from "openclaw/plugin-sdk";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
 import { getZulipRuntime } from "../../runtime.js";
 import type { ZulipReactionWorkflowStage } from "../accounts.js";
 import type { ZulipHttpError } from "../client.js";
@@ -52,6 +53,11 @@ import {
   updateRelayRunModel,
   waitForDispatcherIdleWithTimeout,
 } from "./utilities.js";
+
+/** Strip reasoning/thinking tags from reply text as a safety net. */
+function sanitizeReplyText(text: string): string {
+  return stripReasoningTagsFromText(text, { mode: "strict", trim: "both" });
+}
 
 export async function sendQueuedReaction(
   ctx: MonitorContext,
@@ -312,7 +318,8 @@ export async function handleDmMessage(ctx: MonitorContext, prepared: PreparedZul
       ...prefixOptions,
       humanDelay: ctx.core.channel.reply.resolveHumanDelayConfig(ctx.cfg, route.agentId),
       deliver: async (payload: ReplyPayload) => {
-        const text = payload.text?.trim();
+        if (payload.isReasoning) return;
+        const text = sanitizeReplyText(payload.text ?? "");
         if (!text) return;
 
         const chunks = getZulipRuntime().channel.text.chunkMarkdownText(
@@ -756,7 +763,7 @@ export async function handleMessage(
               extra: { kind: kind ?? "tool" },
             });
           }
-          toolProgress.addLine(payload.text.trim());
+          toolProgress.addLine(sanitizeReplyText(payload.text));
           // Count as a successful delivery since the accumulator handles send/edit.
           successfulDeliveries += 1;
           ctx.opts.statusSink?.({ lastOutboundAt: Date.now() });
