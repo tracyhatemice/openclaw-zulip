@@ -189,6 +189,9 @@ function createHarness(events: ZulipQueueEvent[]) {
         dispatchReplyFromConfig,
       },
     },
+    system: {
+      enqueueSystemEvent: vi.fn(),
+    },
     config: {
       loadConfig: vi.fn(() => ({})),
     },

@@ -186,6 +186,9 @@ describe("monitorZulipProvider cleanup race", () => {
           dispatchReplyFromConfig,
         },
       },
+      system: {
+        enqueueSystemEvent: vi.fn(),
+      },
       config: {
         loadConfig: vi.fn(() => ({})),
       },

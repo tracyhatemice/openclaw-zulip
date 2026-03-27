@@ -2174,102 +2174,18 @@ export async function monitorZulipProvider(
       return { stream: cached.stream, topic: cached.topic };
     };
 
-    const toReactionCommandToken = (emojiName: string) => {
-      const normalized = emojiName
-        .trim()
-        .toLowerCase()
-        .replace(/^:/, "")
-        .replace(/:$/, "")
-        .replace(/[^a-z0-9_+-]+/g, "_")
-        .replace(/^_+|_+$/g, "");
-      return normalized || "emoji";
-    };
-
-    const dispatchSyntheticReactionContext = (params: {
-      stream: string;
-      topic: string;
-      body: string;
-      rawBody: string;
-      commandBody: string;
-      sessionKeySuffix: string;
-      userId: number;
-      userName: string;
-      messageSid: string;
-      systemPrompt: string;
-      errorLabel: string;
-    }) => {
-      const target = `stream:${params.stream}#${params.topic}`;
-      const ctxPayload = core.channel.reply.finalizeInboundContext({
-        Body: params.body,
-        RawBody: params.rawBody,
-        CommandBody: params.commandBody,
-        From: `zulip:user:${params.userId}`,
-        To: target,
-        SessionKey: `zulip:${account.accountId}:reaction:${params.sessionKeySuffix}`,
-        AccountId: account.accountId,
-        ChatType: "channel",
-        ThreadLabel: params.topic,
-        MessageThreadId: params.topic,
-        ConversationLabel: `${params.stream}#${params.topic}`,
-        GroupSubject: params.stream,
-        GroupChannel: `#${params.stream}`,
-        GroupSystemPrompt: params.systemPrompt,
-        Provider: "zulip" as const,
-        Surface: "zulip" as const,
-        SenderName: params.userName,
-        SenderId: String(params.userId),
-        MessageSid: params.messageSid,
-        WasMentioned: true,
-        OriginatingChannel: "zulip" as const,
-        OriginatingTo: target,
-        Timestamp: Date.now(),
-        CommandAuthorized: true,
+    const resolveReactionSessionKey = (source: { stream: string; topic: string }) => {
+      const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "zulip",
+        accountId: account.accountId,
+        peer: { kind: "channel", id: `stream:${source.stream}#${source.topic}` },
       });
-
-      void core.channel.reply
-        .dispatchReplyFromConfig({
-          ctx: ctxPayload,
-          cfg,
-          dispatcher: {
-            sendToolResult: () => true,
-            sendBlockReply: (payload: ReplyPayload) => {
-              if (payload.text) {
-                sendZulipStreamMessage({
-                  auth,
-                  stream: params.stream,
-                  topic: params.topic,
-                  content: payload.text,
-                  abortSignal,
-                }).catch(() => {});
-              }
-              return true;
-            },
-            sendFinalReply: (payload: ReplyPayload) => {
-              if (payload.text) {
-                sendZulipStreamMessage({
-                  auth,
-                  stream: params.stream,
-                  topic: params.topic,
-                  content: payload.text,
-                  abortSignal,
-                }).catch(() => {});
-              }
-              return true;
-            },
-            markComplete: () => {},
-            waitForIdle: () => Promise.resolve(),
-            getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
-          },
-          replyOptions: {
-            disableBlockStreaming: true,
-          },
-        })
-        .catch((err) => {
-          logger.error?.(`[zulip] ${params.errorLabel} dispatch failed: ${String(err)}`);
-        });
+      return route.sessionKey;
     };
 
-    // Handler for reaction events (reaction buttons + optional generic callbacks)
+    // Handler for reaction events (reaction buttons + optional generic callbacks).
+    // Uses lightweight system events (Discord-style) instead of full synthetic agent turns.
     const handleReaction = (reactionEvent: ZulipReactionEvent) => {
       if (typeof reactionEvent.message_id !== "number") {
         return;
@@ -2309,28 +2225,13 @@ export async function monitorZulipProvider(
           return;
         }
 
-        const buttonPayload = {
-          type: "reaction_button_click" as const,
-          messageId: result.messageId,
-          selectedIndex: result.selectedIndex,
-          selectedOption: result.selectedOption,
-          userId: reactionEvent.user_id,
-          userName: reactionEvent.user?.full_name ?? String(reactionEvent.user_id),
-        };
+        const userName = reactionEvent.user?.full_name ?? String(reactionEvent.user_id);
+        const text = `Zulip reaction button click: messageId=${result.messageId}, option="${result.selectedOption?.label}" (${result.selectedOption?.value}), user=${userName}`;
+        const contextKey = `zulip:reaction:button:${result.messageId}:${reactionEvent.user_id}`;
 
-        dispatchSyntheticReactionContext({
-          stream: source.stream,
-          topic: source.topic,
-          body: `[zulip reaction button click: messageId=${result.messageId}, option="${result.selectedOption?.label}" (${result.selectedOption?.value})]`,
-          rawBody: JSON.stringify(buttonPayload),
-          commandBody: `reaction_button_${result.selectedIndex}`,
-          sessionKeySuffix: String(result.messageId),
-          userId: reactionEvent.user_id,
-          userName: reactionEvent.user?.full_name ?? String(reactionEvent.user_id),
-          messageSid: `reaction-button-${result.messageId}-${Date.now()}`,
-          systemPrompt:
-            "A user clicked a reaction button on a previous message. Respond to their selection.",
-          errorLabel: "reaction button",
+        core.system.enqueueSystemEvent(text, {
+          sessionKey: resolveReactionSessionKey(source),
+          contextKey,
         });
         return;
       }
@@ -2364,30 +2265,13 @@ export async function monitorZulipProvider(
         at: Date.now(),
       });
 
-      const normalizedEmojiToken = toReactionCommandToken(reactionEvent.emoji_name);
-      const genericPayload = {
-        type: "reaction_event" as const,
-        op: reactionEvent.op,
-        emojiName: reactionEvent.emoji_name,
-        emojiCode: reactionEvent.emoji_code,
-        messageId: reactionEvent.message_id,
-        userId: reactionEvent.user_id,
-        userName: reactionEvent.user?.full_name ?? String(reactionEvent.user_id),
-      };
+      const userName = reactionEvent.user?.full_name ?? String(reactionEvent.user_id);
+      const text = `Zulip reaction ${reactionEvent.op}: emoji="${reactionEvent.emoji_name}" by ${userName} on messageId=${reactionEvent.message_id}`;
+      const contextKey = `zulip:reaction:${reactionEvent.op}:${reactionEvent.message_id}:${reactionEvent.user_id}:${reactionEvent.emoji_name}`;
 
-      dispatchSyntheticReactionContext({
-        stream: source.stream,
-        topic: source.topic,
-        body: `[zulip reaction ${reactionEvent.op}: messageId=${reactionEvent.message_id}, emoji="${reactionEvent.emoji_name}"]`,
-        rawBody: JSON.stringify(genericPayload),
-        commandBody: `reaction_${reactionEvent.op}_${normalizedEmojiToken}`,
-        sessionKeySuffix: `${reactionEvent.message_id}:${reactionEvent.op}:${normalizedEmojiToken}`,
-        userId: reactionEvent.user_id,
-        userName: reactionEvent.user?.full_name ?? String(reactionEvent.user_id),
-        messageSid: `reaction-generic-${reactionEvent.message_id}-${Date.now()}`,
-        systemPrompt:
-          "A user added or removed a reaction in this topic. Treat this as an inbound signal and respond only if helpful.",
-        errorLabel: "generic reaction",
+      core.system.enqueueSystemEvent(text, {
+        sessionKey: resolveReactionSessionKey(source),
+        contextKey,
       });
     };
 

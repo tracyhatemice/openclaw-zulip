@@ -223,6 +223,9 @@ function createHarness(params?: {
         dispatchReplyFromConfig,
       },
     },
+    system: {
+      enqueueSystemEvent: vi.fn(),
+    },
     config: {
       loadConfig: vi.fn(() => ({})),
     },
@@ -339,7 +342,7 @@ function createHarness(params?: {
     },
   );
 
-  return { dispatchReplyFromConfig };
+  return { dispatchReplyFromConfig, enqueueSystemEvent: runtime.system.enqueueSystemEvent };
 }
 
 describe("monitorZulipProvider recovery checkpoints", () => {
@@ -524,8 +527,8 @@ describe("monitorZulipProvider recovery checkpoints", () => {
     await (monitor as { done: Promise<void> }).done;
   });
 
-  it("dispatches synthetic inbound context for generic reactions when enabled", async () => {
-    const { dispatchReplyFromConfig } = createHarness({
+  it("enqueues system event for generic reactions when enabled", async () => {
+    const { enqueueSystemEvent } = createHarness({
       events: [
         {
           type: "reaction",
@@ -564,21 +567,20 @@ describe("monitorZulipProvider recovery checkpoints", () => {
       },
     });
 
-    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length > 0);
+    await waitForCondition(() => enqueueSystemEvent.mock.calls.length > 0);
 
-    const call = dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx?: Record<string, unknown> };
-    expect(call?.ctx).toMatchObject({
-      CommandBody: "reaction_add_fire",
-      To: "stream:marcel#general",
-      SenderId: "55",
-    });
+    const [text, opts] = enqueueSystemEvent.mock.calls[0] as [string, { sessionKey: string; contextKey: string }];
+    expect(text).toContain("fire");
+    expect(text).toContain("Tester");
+    expect(opts.sessionKey).toBe("session-key");
+    expect(opts.contextKey).toContain("zulip:reaction:add:7002:55");
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
   });
 
   it("ignores generic reaction remove events unless explicitly enabled", async () => {
-    const { dispatchReplyFromConfig } = createHarness({
+    const { enqueueSystemEvent } = createHarness({
       events: [
         {
           type: "reaction",
@@ -623,7 +625,7 @@ describe("monitorZulipProvider recovery checkpoints", () => {
       ),
     );
 
-    expect(dispatchReplyFromConfig).not.toHaveBeenCalled();
+    expect(enqueueSystemEvent).not.toHaveBeenCalled();
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
