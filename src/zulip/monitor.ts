@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
+import { createChannelInboundDebouncer, shouldDebounceTextInbound } from "openclaw/plugin-sdk/channel-inbound";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import { KeyedAsyncQueue } from "openclaw/plugin-sdk/core";
 // Relay tracking stubs — no-op until SDK exposes relay API
 const isRelayRunRegistered = (_runId: string): boolean => false;
 const registerMainRelayRun = (_params: {
@@ -183,8 +185,6 @@ type ZulipMessageSource = "poll" | "catchup" | "freshness" | "recovery";
 
 type ZulipTraceContext = {
   source: ZulipMessageSource;
-  activeHandlers: number;
-  waiterDepth: number;
 };
 
 type PreparedZulipMessage = {
@@ -202,6 +202,7 @@ type PreparedZulipMessage = {
   queuedReactionStarted: boolean;
   reactionController: ReactionTransitionController | null;
   trace: ZulipTraceContext;
+  batch?: { messageSids: string[]; messageSidFirst: string; messageSidLast: string };
 };
 
 export const DEFAULT_DISPATCH_WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
@@ -217,8 +218,6 @@ function buildZulipTraceLog(params: {
   topic?: string;
   sessionKey?: string;
   source?: ZulipMessageSource;
-  activeHandlers?: number;
-  waiterDepth?: number;
   extra?: Record<string, boolean | number | string | undefined>;
 }): string {
   const fields: string[] = [`[zulip-trace][${params.accountId}]`, `milestone=${params.milestone}`];
@@ -239,8 +238,6 @@ function buildZulipTraceLog(params: {
   pushField("stream", params.stream);
   pushField("topic", params.topic);
   pushField("sessionKey", params.sessionKey);
-  pushField("activeHandlers", params.activeHandlers);
-  pushField("waiterDepth", params.waiterDepth);
   for (const [key, value] of Object.entries(params.extra ?? {})) {
     pushField(key, value);
   }
@@ -1069,8 +1066,6 @@ export async function monitorZulipProvider(
       topic?: string;
       sessionKey?: string;
       source?: ZulipMessageSource;
-      activeHandlers?: number;
-      waiterDepth?: number;
       extra?: Record<string, boolean | number | string | undefined>;
     }) => {
       logger.debug?.(
@@ -1102,8 +1097,6 @@ export async function monitorZulipProvider(
         messageId: params.msg.id,
         stream: params.stream,
         topic: params.topic,
-        activeHandlers: params.trace.activeHandlers,
-        waiterDepth: params.trace.waiterDepth,
       });
 
       if (reactions.workflow.enabled) {
@@ -1120,8 +1113,6 @@ export async function monitorZulipProvider(
           messageId: params.msg.id,
           stream: params.stream,
           topic: params.topic,
-          activeHandlers: params.trace.activeHandlers,
-          waiterDepth: params.trace.waiterDepth,
           extra: { reactionMode: "workflow" },
         });
         return { queuedReactionStarted: true, reactionController };
@@ -1141,8 +1132,6 @@ export async function monitorZulipProvider(
         messageId: params.msg.id,
         stream: params.stream,
         topic: params.topic,
-        activeHandlers: params.trace.activeHandlers,
-        waiterDepth: params.trace.waiterDepth,
         extra: { reactionMode: "classic" },
       });
       return { queuedReactionStarted: true, reactionController: null };
@@ -1151,8 +1140,6 @@ export async function monitorZulipProvider(
     const prepareMessageForHandling = async (params: {
       msg: ZulipEventMessage;
       source: ZulipMessageSource;
-      activeHandlers: number;
-      waiterDepth: number;
       recoveryCheckpoint?: ZulipInFlightCheckpoint;
     }): Promise<PreparedZulipMessage | undefined> => {
       const { msg } = params;
@@ -1198,8 +1185,6 @@ export async function monitorZulipProvider(
 
       const trace: ZulipTraceContext = {
         source: params.source,
-        activeHandlers: params.activeHandlers,
-        waiterDepth: params.waiterDepth,
       };
       logTrace({
         milestone: "event_seen",
@@ -1207,8 +1192,6 @@ export async function monitorZulipProvider(
         messageId: msg.id,
         stream: stream || undefined,
         topic: topic || undefined,
-        activeHandlers: params.activeHandlers,
-        waiterDepth: params.waiterDepth,
         extra: { kind: classified.kind },
       });
 
@@ -1311,7 +1294,10 @@ export async function monitorZulipProvider(
         Surface: "zulip" as const,
         SenderName: senderName,
         SenderId: String(senderId),
-        MessageSid: String(msg.id),
+        MessageSid: prepared.batch?.messageSidLast ?? String(msg.id),
+        MessageSids: prepared.batch?.messageSids,
+        MessageSidFirst: prepared.batch?.messageSidFirst,
+        MessageSidLast: prepared.batch?.messageSidLast,
         OriginatingChannel: "zulip" as const,
         OriginatingTo: to,
         Timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
@@ -1632,8 +1618,6 @@ export async function monitorZulipProvider(
         stream,
         topic,
         sessionKey,
-        activeHandlers: prepared.trace.activeHandlers,
-        waiterDepth: prepared.trace.waiterDepth,
       });
 
       const to = `stream:${stream}#${topic}`;
@@ -1669,7 +1653,10 @@ export async function monitorZulipProvider(
         Surface: "zulip" as const,
         SenderName: senderName,
         SenderId: String(msg.sender_id),
-        MessageSid: String(msg.id),
+        MessageSid: prepared.batch?.messageSidLast ?? String(msg.id),
+        MessageSids: prepared.batch?.messageSids,
+        MessageSidFirst: prepared.batch?.messageSidFirst,
+        MessageSidLast: prepared.batch?.messageSidLast,
         WasMentioned: wasMentioned,
         OriginatingChannel: "zulip" as const,
         OriginatingTo: to,
@@ -1782,8 +1769,6 @@ export async function monitorZulipProvider(
                   stream,
                   topic,
                   sessionKey,
-                  activeHandlers: prepared.trace.activeHandlers,
-                  waiterDepth: prepared.trace.waiterDepth,
                   extra: { kind: kind ?? "tool" },
                 });
               }
@@ -1815,8 +1800,6 @@ export async function monitorZulipProvider(
                 stream,
                 topic,
                 sessionKey,
-                activeHandlers: prepared.trace.activeHandlers,
-                waiterDepth: prepared.trace.waiterDepth,
                 extra: { kind: kind ?? "reply" },
               });
             }
@@ -1898,8 +1881,6 @@ export async function monitorZulipProvider(
               stream,
               topic,
               sessionKey,
-              activeHandlers: prepared.trace.activeHandlers,
-              waiterDepth: prepared.trace.waiterDepth,
               extra: { attempt: attempt + 1 },
             });
             await core.channel.reply.dispatchReplyFromConfig({
@@ -1935,8 +1916,6 @@ export async function monitorZulipProvider(
               stream,
               topic,
               sessionKey,
-              activeHandlers: prepared.trace.activeHandlers,
-              waiterDepth: prepared.trace.waiterDepth,
               extra: { ok: true, attempt: attempt + 1 },
             });
             break;
@@ -1965,8 +1944,6 @@ export async function monitorZulipProvider(
               stream,
               topic,
               sessionKey,
-              activeHandlers: prepared.trace.activeHandlers,
-              waiterDepth: prepared.trace.waiterDepth,
               extra: { ok: false, attempt: attempt + 1 },
             });
           }
@@ -2093,8 +2070,6 @@ export async function monitorZulipProvider(
             stream,
             topic,
             sessionKey,
-            activeHandlers: prepared.trace.activeHandlers,
-            waiterDepth: prepared.trace.waiterDepth,
             extra: { ok, successfulDeliveries },
           });
         }
@@ -2335,8 +2310,6 @@ export async function monitorZulipProvider(
           const prepared = await prepareMessageForHandling({
             msg: syntheticMessage,
             source: "recovery",
-            activeHandlers: 0,
-            waiterDepth: 0,
             recoveryCheckpoint: checkpoint,
           });
           if (!prepared) {
@@ -2361,48 +2334,92 @@ export async function monitorZulipProvider(
       let retry = 0;
       let stage: "register" | "poll" | "handle" = "register";
 
-      // Backpressure: limit concurrent message handlers to prevent unbounded pile-up.
-      // Set high enough to handle many active topics simultaneously — each handler holds
-      // its slot for the full agent turn (which can take 30-120s with Opus + tools).
-      // A low limit (e.g. 5) causes messages to queue behind long-running turns.
-      const MAX_CONCURRENT_HANDLERS = 20;
-      let activeHandlers = 0;
-      const handlerWaiters: Array<() => void> = [];
+      // Per-session keyed queue: messages for the same session key are serialized
+      // (strict FIFO), while different sessions run in parallel.
+      const inboundQueue = new KeyedAsyncQueue();
 
-      const throttledHandleMessage = async (msg: ZulipEventMessage, source: ZulipMessageSource) => {
-        const prepared = await prepareMessageForHandling({
-          msg,
-          source,
-          activeHandlers,
-          waiterDepth: handlerWaiters.length,
+      const queueMessage = async (
+        msg: ZulipEventMessage,
+        source: ZulipMessageSource,
+        batch?: { messageSids: string[]; messageSidFirst: string; messageSidLast: string },
+      ) => {
+        const prepared = await prepareMessageForHandling({ msg, source });
+        if (!prepared) return;
+
+        if (batch) {
+          prepared.batch = batch;
+        }
+
+        // Resolve the session key for queue routing — same canonical-topic logic
+        // the handler itself uses, so messages in the same topic serialize.
+        const { topicKey: canonicalTopicKey, stream: canonicalStream } =
+          resolveCanonicalTopicSessionKey({ aliases: topicAliases, stream: prepared.stream, topic: prepared.topic });
+        const canonicalTopic = safeDecodeTopicKey(canonicalTopicKey);
+        const route = core.channel.routing.resolveAgentRoute({
+          cfg,
+          channel: "zulip",
+          accountId: account.accountId,
+          peer: { kind: "channel", id: `stream:${canonicalStream}#${canonicalTopic}` },
         });
-        if (!prepared) {
-          return;
-        }
+        const queueKey = prepared.kind === "stream"
+          ? route.sessionKey
+          : `dm:${msg.sender_id}`;
 
-        if (activeHandlers >= MAX_CONCURRENT_HANDLERS) {
-          logTrace({
-            milestone: "handler_wait_start",
-            source,
-            messageId: msg.id,
-            stream: prepared.stream,
-            topic: prepared.topic,
-            activeHandlers,
-            waiterDepth: handlerWaiters.length + 1,
-          });
-          await new Promise<void>((resolve) => handlerWaiters.push(resolve));
-        }
-        activeHandlers++;
-        try {
-          prepared.trace.activeHandlers = activeHandlers;
-          prepared.trace.waiterDepth = handlerWaiters.length;
+        void inboundQueue.enqueue(queueKey, async () => {
           await handleMessage(prepared);
-        } finally {
-          activeHandlers--;
-          const next = handlerWaiters.shift();
-          if (next) next();
-        }
+        }).catch((err) => {
+          runtime.error?.(`zulip: message processing failed: ${String(err)}`);
+        });
       };
+
+      // Debouncer: batches rapid-fire messages from the same author in the same
+      // topic into a single combined message, reducing agent turns.
+      const isDmQueue = stream === "__dm__";
+      const { debouncer } = createChannelInboundDebouncer<{
+        msg: ZulipEventMessage;
+        source: ZulipMessageSource;
+      }>({
+        cfg,
+        channel: "zulip",
+        buildKey: (entry) => {
+          if (isDmQueue) {
+            return `zulip:${account.accountId}:dm:${entry.msg.sender_id}`;
+          }
+          const s = normalizeStreamName(
+            typeof entry.msg.display_recipient === "string" ? entry.msg.display_recipient : "",
+          );
+          const t = normalizeTopic(entry.msg.subject) || account.defaultTopic;
+          if (!s) return null;
+          return `zulip:${account.accountId}:${s}:${t}:${entry.msg.sender_id}`;
+        },
+        shouldDebounce: (entry) =>
+          shouldDebounceTextInbound({
+            text: entry.msg.content ?? "",
+            cfg,
+            hasMedia: (entry.msg.content ?? "").includes("/user_uploads/"),
+          }),
+        onFlush: async (entries) => {
+          if (entries.length === 1) {
+            await queueMessage(entries[0].msg, entries[0].source);
+            return;
+          }
+          // Combine rapid-fire messages into a synthetic batch.
+          const last = entries[entries.length - 1];
+          const combinedContent = entries.map((e) => e.msg.content ?? "").join("\n");
+          const syntheticMsg: ZulipEventMessage = {
+            ...last.msg,
+            content: combinedContent,
+          };
+          await queueMessage(syntheticMsg, last.source, {
+            messageSids: entries.map((e) => String(e.msg.id)),
+            messageSidFirst: String(entries[0].msg.id),
+            messageSidLast: String(last.msg.id),
+          });
+        },
+        onError: (err) => {
+          runtime.error?.(`zulip: debounce flush failed: ${String(err)}`);
+        },
+      });
 
       // Freshness checker: periodically verify we haven't missed messages during
       // long-poll gaps, queue re-registrations, or silent connection drops.
@@ -2432,9 +2449,7 @@ export async function monitorZulipProvider(
               if (typeof msg.id === "number" && msg.id > lastSeenMsgId) {
                 caught++;
                 lastSeenMsgId = msg.id;
-                throttledHandleMessage(msg, "freshness").catch((err) => {
-                  runtime.error?.(`zulip: freshness catchup failed: ${String(err)}`);
-                });
+                debouncer.enqueue({ msg, source: "freshness" });
               }
             }
             if (caught > 0) {
@@ -2484,9 +2499,7 @@ export async function monitorZulipProvider(
                       lastSeenMsgId = msg.id;
                     }
                     // dedupe.check skips already-processed messages
-                    throttledHandleMessage(msg, "catchup").catch((err) => {
-                      runtime.error?.(`zulip: catchup message failed: ${String(err)}`);
-                    });
+                    debouncer.enqueue({ msg, source: "catchup" });
                   }
                 }
               } catch (catchupErr) {
@@ -2624,12 +2637,7 @@ export async function monitorZulipProvider(
 
           stage = "handle";
           for (const msg of messages) {
-            // Use throttled handler with backpressure (max concurrent limit)
-            throttledHandleMessage(msg, "poll").catch((err) => {
-              runtime.error?.(`zulip: message processing failed: ${String(err)}`);
-            });
-            // Small stagger between starting each message for natural pacing
-            await sleep(200, abortSignal).catch(() => undefined);
+            debouncer.enqueue({ msg, source: "poll" });
           }
 
           retry = 0;
