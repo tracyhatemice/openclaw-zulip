@@ -26,39 +26,39 @@ vi.mock("openclaw/plugin-sdk/channel-reply-pipeline", () => ({
   createChannelReplyPipeline: mocks.createChannelReplyPipeline,
 }));
 
-vi.mock("../runtime.js", () => ({
+vi.mock("../../runtime.js", () => ({
   getZulipRuntime: mocks.getZulipRuntime,
 }));
 
-vi.mock("./accounts.js", () => ({
+vi.mock("../accounts.js", () => ({
   resolveZulipAccount: mocks.resolveZulipAccount,
 }));
 
-vi.mock("./client.js", () => ({
+vi.mock("../client.js", () => ({
   zulipRequest: mocks.zulipRequest,
 }));
 
-vi.mock("./send.js", () => ({
+vi.mock("../send.js", () => ({
   sendZulipStreamMessage: mocks.sendZulipStreamMessage,
 }));
 
-vi.mock("./uploads.js", () => ({
+vi.mock("../uploads.js", () => ({
   downloadZulipUploads: mocks.downloadZulipUploads,
   resolveOutboundMedia: mocks.resolveOutboundMedia,
   uploadZulipFile: mocks.uploadZulipFile,
 }));
 
-vi.mock("./reactions.js", () => ({
+vi.mock("../reactions.js", () => ({
   addZulipReaction: mocks.addZulipReaction,
   removeZulipReaction: mocks.removeZulipReaction,
 }));
 
-vi.mock("./queue-plan.js", () => ({
+vi.mock("../queue-plan.js", () => ({
   buildZulipQueuePlan: mocks.buildZulipQueuePlan,
   buildZulipRegisterNarrow: mocks.buildZulipRegisterNarrow,
 }));
 
-vi.mock("./inflight-checkpoints.js", () => ({
+vi.mock("../inflight-checkpoints.js", () => ({
   ZULIP_INFLIGHT_CHECKPOINT_VERSION: 1,
   ZULIP_INFLIGHT_MAX_RETRY_COUNT: 25,
   loadZulipInFlightCheckpoints: mocks.loadZulipInFlightCheckpoints,
@@ -70,26 +70,26 @@ vi.mock("./inflight-checkpoints.js", () => ({
   buildZulipCheckpointId: mocks.buildZulipCheckpointId,
 }));
 
-vi.mock("./processed-message-state.js", () => ({
+vi.mock("../processed-message-state.js", () => ({
   loadZulipProcessedMessageState: vi.fn(async () => ({ accountId: "default", messages: {} })),
   writeZulipProcessedMessageState: vi.fn(async () => undefined),
   isZulipMessageAlreadyProcessed: vi.fn(() => false),
   markZulipMessageProcessed: vi.fn(() => ({ accountId: "default", messages: {} })),
 }));
 
-vi.mock("./reaction-buttons.js", () => ({
+vi.mock("../reaction-buttons.js", () => ({
   startReactionButtonSessionCleanup: vi.fn(),
   stopReactionButtonSessionCleanup: vi.fn(),
   getReactionButtonSession: vi.fn(() => undefined),
   handleReactionEvent: vi.fn(),
 }));
 
-vi.mock("./typing.js", () => ({
+vi.mock("../typing.js", () => ({
   sendZulipStreamTypingStart: vi.fn(async () => undefined),
   sendZulipStreamTypingStop: vi.fn(async () => undefined),
 }));
 
-import { monitorZulipProvider, ZULIP_RECOVERY_NOTICE } from "./monitor.js";
+import { monitorZulipProvider, ZULIP_RECOVERY_NOTICE } from "./index.js";
 
 type ZulipEventMessage = {
   id: number;

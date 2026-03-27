@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { computeZulipMonitorBackoffMs } from "./monitor.js";
+import { computeZulipMonitorBackoffMs } from "./index.js";
 
 describe("computeZulipMonitorBackoffMs", () => {
   it("respects retry-after when higher than exponential", () => {

@@ -3,7 +3,7 @@ import {
   buildKeepaliveMessageContent,
   createBestEffortShutdownNoticeSender,
   startPeriodicKeepalive,
-} from "./monitor.js";
+} from "./index.js";
 
 describe("monitor keepalive + shutdown helpers", () => {
   afterEach(() => {
