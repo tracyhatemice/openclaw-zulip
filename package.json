@@ -22,7 +22,8 @@
     "openclaw": ">=2026.3.23"
   },
   "devDependencies": {
-    "openclaw": "2026.3.23"
+    "openclaw": "^2026.3.24",
+    "vitest": "^4.1.2"
   },
   "openclaw": {
     "extensions": [

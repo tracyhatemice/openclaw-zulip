@@ -213,7 +213,6 @@ function createHarness(params?: {
         matchesMentionPatterns: vi.fn(() => false),
       },
       reply: {
-        formatInboundEnvelope: vi.fn(({ body }: { body: string }) => body),
         finalizeInboundContext: vi.fn((ctx: object) => ctx),
         createReplyDispatcherWithTyping: vi.fn(() => ({
           dispatcher,

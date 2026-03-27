@@ -1298,17 +1298,8 @@ export async function monitorZulipProvider(
         peer: { kind: "direct", id: String(senderId) },
       });
 
-      const body = core.channel.reply.formatInboundEnvelope({
-        channel: "Zulip",
-        from: senderName,
-        timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
-        body: `${cleanedContent}\n[zulip message id: ${msg.id}]`,
-        chatType: "direct",
-        sender: { name: senderName, id: String(senderId) },
-      });
-
       const ctxPayload = core.channel.reply.finalizeInboundContext({
-        Body: body,
+        BodyForAgent: cleanedContent,
         RawBody: cleanedContent,
         CommandBody: cleanedContent,
         From: from,
@@ -1657,17 +1648,8 @@ export async function monitorZulipProvider(
         mentionRegexes,
       );
 
-      const body = core.channel.reply.formatInboundEnvelope({
-        channel: "Zulip",
-        from: `${stream} (${topic || account.defaultTopic})`,
-        timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
-        body: `${cleanedContent}\n[zulip message id: ${msg.id} stream: ${stream} topic: ${topic}]`,
-        chatType: "channel",
-        sender: { name: senderName, id: String(msg.sender_id) },
-      });
-
       const ctxPayload = core.channel.reply.finalizeInboundContext({
-        Body: body,
+        BodyForAgent: cleanedContent,
         RawBody: cleanedContent,
         CommandBody: cleanedContent,
         From: from,
@@ -1681,7 +1663,7 @@ export async function monitorZulipProvider(
         GroupSubject: stream,
         GroupChannel: `#${stream}`,
         GroupSystemPrompt: !account.requireMention
-          ? "Always reply to every message in this Zulip stream/topic. If a full response isn't needed, acknowledge briefly in 1 short sentence. If you already sent your reply via the message tool, that counts as your reply. To start a new topic, prefix your reply with: [[zulip_topic: <topic>]]"
+          ? "If you want to start a new topic, generate concise topic (3-6 words). Use stream context when provided and avoid redundant stream-name words unless needed for clarity. Prefix your reply with: [[zulip_topic: <topic>]]"
           : undefined,
         Provider: "zulip" as const,
         Surface: "zulip" as const,
@@ -1721,7 +1703,7 @@ export async function monitorZulipProvider(
             senderName,
             senderEmail: msg.sender_email,
             cleanedContent,
-            body,
+            body: cleanedContent,
             sessionKey,
             from,
             to,

@@ -108,8 +108,7 @@ export const zulipPlugin = createChatChannelPlugin({
         "- Use `sendWithReactions` action to present numbered choices via emoji reactions (workaround for no interactive buttons).",
         "- Zulip supports spoiler blocks with ` ```spoiler title\\n...\\n``` ` syntax for collapsible content.",
         "- Mention users with `@**Full Name**` syntax. Use `@**all**` or `@**everyone**` for wildcard mentions.",
-        "- Use `topic-list` action to list topics in a stream.",
-        "- When using reasoning format (<think>/<final>), NO_REPLY should be wrapped: <think>Sent via message tool.</think> <final>NO_REPLY</final>",
+        "- Use `topic-list` action to list topics in a stream."
       ],
     },
     messaging: {
