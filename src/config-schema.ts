@@ -66,6 +66,8 @@ const ActionsSchema = z
     channelCreate: z.boolean().optional(),
     channelEdit: z.boolean().optional(),
     channelDelete: z.boolean().optional(),
+    topicEdit: z.boolean().optional(),
+    topicResolve: z.boolean().optional(),
     memberInfo: z.boolean().optional(),
     search: z.boolean().optional(),
     edit: z.boolean().optional(),
