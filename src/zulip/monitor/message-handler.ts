@@ -637,9 +637,7 @@ export async function handleMessage(
     ConversationLabel: `${stream}#${topic}`,
     GroupSubject: stream,
     GroupChannel: `#${stream}`,
-    GroupSystemPrompt: !ctx.account.requireMention
-      ? "If you want to start a new topic, generate concise topic (3-6 words). Use stream context when provided and avoid redundant stream-name words unless needed for clarity. Prefix your reply with: [[zulip_topic: <topic>]]"
-      : undefined,
+    GroupSystemPrompt: undefined,
     Provider: "zulip" as const,
     Surface: "zulip" as const,
     SenderName: senderName,

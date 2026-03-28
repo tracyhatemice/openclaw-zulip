@@ -30,6 +30,7 @@ vi.mock("./reactions.js", () => ({
 
 vi.mock("./send.js", () => ({
   sendZulipStreamMessage: vi.fn(async () => ({ result: "success", id: 42 })),
+  editZulipMessageTopic: vi.fn(async () => ({ result: "success" })),
 }));
 
 vi.mock("./uploads.js", () => ({
@@ -47,7 +48,7 @@ vi.mock("./reaction-buttons.js", () => ({
 
 import { zulipRequest, zulipRequestWithRetry } from "./client.js";
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
-import { sendZulipStreamMessage } from "./send.js";
+import { editZulipMessageTopic, sendZulipStreamMessage } from "./send.js";
 import { sendWithReactionButtons } from "./reaction-buttons.js";
 import { zulipMessageActions } from "./actions.js";
 
@@ -781,5 +782,225 @@ describe("action gating defaults", () => {
     );
     const details = res.details as any;
     expect(details.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleAction - topic-edit
+// ---------------------------------------------------------------------------
+
+describe("handleAction - topic-edit", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls editZulipMessageTopic with correct params", async () => {
+    await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-edit",
+        { messageId: "100", topic: "New Topic" },
+        { actions: { topicEdit: true } },
+      ),
+    );
+    expect(editZulipMessageTopic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: 100,
+        topic: "New Topic",
+        propagateMode: "change_all",
+      }),
+    );
+  });
+
+  it("defaults propagateMode to change_all", async () => {
+    await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-edit",
+        { messageId: "1", topic: "t" },
+        { actions: { topicEdit: true } },
+      ),
+    );
+    expect(editZulipMessageTopic).toHaveBeenCalledWith(
+      expect.objectContaining({ propagateMode: "change_all" }),
+    );
+  });
+
+  it("passes explicit propagateMode", async () => {
+    await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-edit",
+        { messageId: "1", topic: "t", propagateMode: "change_one" },
+        { actions: { topicEdit: true } },
+      ),
+    );
+    expect(editZulipMessageTopic).toHaveBeenCalledWith(
+      expect.objectContaining({ propagateMode: "change_one" }),
+    );
+  });
+
+  it("passes streamId for cross-stream moves", async () => {
+    await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-edit",
+        { messageId: "1", topic: "t", streamId: 42 },
+        { actions: { topicEdit: true } },
+      ),
+    );
+    expect(editZulipMessageTopic).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 42 }),
+    );
+  });
+
+  it("throws when topic-edit action disabled", async () => {
+    await expect(
+      zulipMessageActions.handleAction(
+        makeCtx(
+          "topic-edit",
+          { messageId: "1", topic: "t" },
+          { actions: { topicEdit: false } },
+        ),
+      ),
+    ).rejects.toThrow(/disabled/i);
+  });
+
+  it("defaults to disabled", async () => {
+    await expect(
+      zulipMessageActions.handleAction(
+        makeCtx("topic-edit", { messageId: "1", topic: "t" }),
+      ),
+    ).rejects.toThrow(/disabled/i);
+  });
+
+  it("throws when required params are missing", async () => {
+    await expect(
+      zulipMessageActions.handleAction(
+        makeCtx("topic-edit", {}, { actions: { topicEdit: true } }),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleAction - topic-resolve
+// ---------------------------------------------------------------------------
+
+describe("handleAction - topic-resolve", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("adds resolved prefix when resolving", async () => {
+    await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-resolve",
+        { messageId: "1", currentTopic: "Bug Report" },
+        { actions: { topicResolve: true } },
+      ),
+    );
+    expect(editZulipMessageTopic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: "\u2714 Bug Report",
+        propagateMode: "change_all",
+      }),
+    );
+  });
+
+  it("removes resolved prefix when unresolving", async () => {
+    await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-resolve",
+        { messageId: "1", currentTopic: "\u2714 Bug Report", unresolve: true },
+        { actions: { topicResolve: true } },
+      ),
+    );
+    expect(editZulipMessageTopic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: "Bug Report",
+        propagateMode: "change_all",
+      }),
+    );
+  });
+
+  it("returns alreadyInDesiredState when already resolved", async () => {
+    const res = await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-resolve",
+        { messageId: "1", currentTopic: "\u2714 Bug Report" },
+        { actions: { topicResolve: true } },
+      ),
+    );
+    const details = res.details as any;
+    expect(details.alreadyInDesiredState).toBe(true);
+    expect(editZulipMessageTopic).not.toHaveBeenCalled();
+  });
+
+  it("returns alreadyInDesiredState when already unresolved", async () => {
+    const res = await zulipMessageActions.handleAction(
+      makeCtx(
+        "topic-resolve",
+        { messageId: "1", currentTopic: "Bug Report", unresolve: true },
+        { actions: { topicResolve: true } },
+      ),
+    );
+    const details = res.details as any;
+    expect(details.alreadyInDesiredState).toBe(true);
+    expect(editZulipMessageTopic).not.toHaveBeenCalled();
+  });
+
+  it("throws when topic-resolve action disabled", async () => {
+    await expect(
+      zulipMessageActions.handleAction(
+        makeCtx(
+          "topic-resolve",
+          { messageId: "1", currentTopic: "t" },
+          { actions: { topicResolve: false } },
+        ),
+      ),
+    ).rejects.toThrow(/disabled/i);
+  });
+
+  it("defaults to disabled", async () => {
+    await expect(
+      zulipMessageActions.handleAction(
+        makeCtx("topic-resolve", { messageId: "1", currentTopic: "t" }),
+      ),
+    ).rejects.toThrow(/disabled/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describeMessageTool - topic actions
+// ---------------------------------------------------------------------------
+
+describe("describeMessageTool - topic actions", () => {
+  it("includes topic-edit when enabled", () => {
+    const result = zulipMessageActions.describeMessageTool({
+      cfg: makeConfig({ actions: { topicEdit: true } }),
+      accountId: "default",
+    });
+    expect(result.actions).toContain("topic-edit");
+  });
+
+  it("excludes topic-edit when not enabled (defaults disabled)", () => {
+    const result = zulipMessageActions.describeMessageTool({
+      cfg: makeConfig(),
+      accountId: "default",
+    });
+    expect(result.actions).not.toContain("topic-edit");
+  });
+
+  it("includes topic-resolve when enabled", () => {
+    const result = zulipMessageActions.describeMessageTool({
+      cfg: makeConfig({ actions: { topicResolve: true } }),
+      accountId: "default",
+    });
+    expect(result.actions).toContain("topic-resolve");
+  });
+
+  it("excludes topic-resolve when not enabled (defaults disabled)", () => {
+    const result = zulipMessageActions.describeMessageTool({
+      cfg: makeConfig(),
+      accountId: "default",
+    });
+    expect(result.actions).not.toContain("topic-resolve");
   });
 });

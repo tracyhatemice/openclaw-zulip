@@ -9,6 +9,7 @@ import {
   sendZulipStreamMessage,
   sendZulipDirectMessage,
   editZulipStreamMessage,
+  editZulipMessageTopic,
 } from "./send.js";
 import type { ZulipAuth } from "./client.js";
 
@@ -115,6 +116,72 @@ describe("editZulipStreamMessage", () => {
 
   it("uses maxRetries: 3 (fewer than send)", async () => {
     await editZulipStreamMessage({ auth, messageId: 1, content: "c" });
+    const { retry } = mockRequest.mock.calls[0][0];
+    expect(retry.maxRetries).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// editZulipMessageTopic
+// ---------------------------------------------------------------------------
+describe("editZulipMessageTopic", () => {
+  it("sends PATCH with topic and propagate_mode in form", async () => {
+    await editZulipMessageTopic({ auth, messageId: 100, topic: "New Topic" });
+    const call = mockRequest.mock.calls[0][0];
+    expect(call.method).toBe("PATCH");
+    expect(call.path).toBe("/api/v1/messages/100");
+    expect(call.form).toEqual({
+      topic: "New Topic",
+      propagate_mode: "change_all",
+    });
+  });
+
+  it("defaults propagateMode to change_all", async () => {
+    await editZulipMessageTopic({ auth, messageId: 1, topic: "t" });
+    const { form } = mockRequest.mock.calls[0][0];
+    expect(form.propagate_mode).toBe("change_all");
+  });
+
+  it("passes explicit propagateMode", async () => {
+    await editZulipMessageTopic({ auth, messageId: 1, topic: "t", propagateMode: "change_one" });
+    const { form } = mockRequest.mock.calls[0][0];
+    expect(form.propagate_mode).toBe("change_one");
+  });
+
+  it("includes stream_id when provided", async () => {
+    await editZulipMessageTopic({ auth, messageId: 1, topic: "t", streamId: 42 });
+    const { form } = mockRequest.mock.calls[0][0];
+    expect(form.stream_id).toBe(42);
+  });
+
+  it("omits stream_id when not provided", async () => {
+    await editZulipMessageTopic({ auth, messageId: 1, topic: "t" });
+    const { form } = mockRequest.mock.calls[0][0];
+    expect(form.stream_id).toBeUndefined();
+  });
+
+  it("passes notification flags when provided", async () => {
+    await editZulipMessageTopic({
+      auth,
+      messageId: 1,
+      topic: "t",
+      sendNotificationToOldThread: true,
+      sendNotificationToNewThread: false,
+    });
+    const { form } = mockRequest.mock.calls[0][0];
+    expect(form.send_notification_to_old_thread).toBe(true);
+    expect(form.send_notification_to_new_thread).toBe(false);
+  });
+
+  it("omits notification flags when not provided", async () => {
+    await editZulipMessageTopic({ auth, messageId: 1, topic: "t" });
+    const { form } = mockRequest.mock.calls[0][0];
+    expect(form.send_notification_to_old_thread).toBeUndefined();
+    expect(form.send_notification_to_new_thread).toBeUndefined();
+  });
+
+  it("uses maxRetries: 3", async () => {
+    await editZulipMessageTopic({ auth, messageId: 1, topic: "t" });
     const { retry } = mockRequest.mock.calls[0][0];
     expect(retry.maxRetries).toBe(3);
   });

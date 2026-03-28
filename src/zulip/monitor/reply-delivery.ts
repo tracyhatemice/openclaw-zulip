@@ -5,8 +5,6 @@ import type { ResolvedZulipAccount } from "../accounts.js";
 import type { ZulipAuth } from "../client.js";
 import { sendZulipStreamMessage } from "../send.js";
 import { resolveOutboundMedia, uploadZulipFile } from "../uploads.js";
-import { extractZulipTopicDirective } from "./utilities.js";
-
 export async function deliverReply(params: {
   account: ResolvedZulipAccount;
   auth: ZulipAuth;
@@ -19,9 +17,8 @@ export async function deliverReply(params: {
   const core = getZulipRuntime();
   const logger = core.logging.getChildLogger({ channel: "zulip" });
 
-  const topicDirective = extractZulipTopicDirective(params.payload.text ?? "");
-  const topic = topicDirective.topic ?? params.topic;
-  const text = stripReasoningTagsFromText(topicDirective.text, { mode: "strict", trim: "both" });
+  const topic = params.topic;
+  const text = stripReasoningTagsFromText(params.payload.text ?? "", { mode: "strict", trim: "both" });
   const mediaUrls = (params.payload.mediaUrls ?? []).filter(Boolean);
   const mediaUrl = params.payload.mediaUrl?.trim();
   if (mediaUrl) {

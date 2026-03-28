@@ -8,7 +8,7 @@ import { normalizeStreamName } from "./normalize.js";
 import { normalizeTopic } from "./normalize.js";
 import { sendWithReactionButtons, type ReactionButtonOption } from "./reaction-buttons.js";
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
-import { sendZulipStreamMessage } from "./send.js";
+import { editZulipMessageTopic, sendZulipStreamMessage } from "./send.js";
 import { parseZulipStreamTarget } from "./targets.js";
 import { uploadZulipFile, resolveOutboundMedia } from "./uploads.js";
 
@@ -22,6 +22,8 @@ const GATED_ACTIONS = [
   "search",
   "edit",
   "delete",
+  "topic-edit",
+  "topic-resolve",
 ] as const;
 type GatedAction = (typeof GATED_ACTIONS)[number];
 
@@ -33,6 +35,8 @@ type ZulipActionConfig = {
   search?: boolean;
   edit?: boolean;
   delete?: boolean;
+  topicEdit?: boolean;
+  topicResolve?: boolean;
 };
 
 function resolveZulipActionConfig(
@@ -69,6 +73,8 @@ const DEFAULTS_TO_DISABLED: ReadonlySet<string> = new Set([
   "channel-create",
   "channel-edit",
   "channel-delete",
+  "topic-edit",
+  "topic-resolve",
 ]);
 
 function resolveActionConfigKey(action: GatedAction): keyof ZulipActionConfig {
@@ -87,6 +93,10 @@ function resolveActionConfigKey(action: GatedAction): keyof ZulipActionConfig {
       return "edit";
     case "delete":
       return "delete";
+    case "topic-edit":
+      return "topicEdit";
+    case "topic-resolve":
+      return "topicResolve";
   }
 }
 
@@ -559,6 +569,86 @@ async function handleTopicList(params: ActionParams, cfg: unknown, accountId?: s
   };
 }
 
+// -- Topic Edit --
+
+async function handleTopicEdit(params: ActionParams, cfg: unknown, accountId?: string | null) {
+  const { auth } = resolveAuth(cfg, accountId);
+  const messageId = requireString(params, "messageId");
+  const topic = requireString(params, "topic");
+  const propagateMode = (optionalString(params, "propagateMode") ?? "change_all") as
+    | "change_one"
+    | "change_later"
+    | "change_all";
+  const streamId = optionalNumber(params, "streamId");
+  const sendNotificationToOldThread = optionalBoolean(params, "sendNotificationToOldThread");
+  const sendNotificationToNewThread = optionalBoolean(params, "sendNotificationToNewThread");
+
+  await editZulipMessageTopic({
+    auth,
+    messageId: Number(messageId),
+    topic,
+    propagateMode,
+    streamId: streamId ?? undefined,
+    sendNotificationToOldThread: sendNotificationToOldThread ?? undefined,
+    sendNotificationToNewThread: sendNotificationToNewThread ?? undefined,
+  });
+
+  return {
+    ok: true,
+    action: "topic-edit",
+    messageId,
+    topic,
+    propagateMode,
+    ...(streamId !== undefined && streamId !== null ? { streamId } : {}),
+  };
+}
+
+// -- Topic Resolve --
+
+const RESOLVED_TOPIC_PREFIX = "\u2714 ";
+
+async function handleTopicResolve(params: ActionParams, cfg: unknown, accountId?: string | null) {
+  const { auth } = resolveAuth(cfg, accountId);
+  const messageId = requireString(params, "messageId");
+  const currentTopic = requireString(params, "currentTopic");
+  const unresolve = optionalBoolean(params, "unresolve") ?? false;
+
+  const isCurrentlyResolved = currentTopic.startsWith(RESOLVED_TOPIC_PREFIX);
+
+  let newTopic: string;
+  if (unresolve) {
+    newTopic = isCurrentlyResolved ? currentTopic.slice(RESOLVED_TOPIC_PREFIX.length) : currentTopic;
+  } else {
+    newTopic = isCurrentlyResolved ? currentTopic : `${RESOLVED_TOPIC_PREFIX}${currentTopic}`;
+  }
+
+  if (newTopic === currentTopic) {
+    return {
+      ok: true,
+      action: "topic-resolve",
+      messageId,
+      topic: currentTopic,
+      resolved: !unresolve,
+      alreadyInDesiredState: true,
+    };
+  }
+
+  await editZulipMessageTopic({
+    auth,
+    messageId: Number(messageId),
+    topic: newTopic,
+    propagateMode: "change_all",
+  });
+
+  return {
+    ok: true,
+    action: "topic-resolve",
+    messageId,
+    topic: newTopic,
+    resolved: !unresolve,
+  };
+}
+
 // -- Member Info --
 
 async function handleMemberInfo(params: ActionParams, cfg: unknown, accountId?: string | null) {
@@ -746,6 +836,8 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
     if (isZulipActionEnabled(cfg, "channel-create", accountId)) actions.push("channel-create");
     if (isZulipActionEnabled(cfg, "channel-edit", accountId)) actions.push("channel-edit");
     if (isZulipActionEnabled(cfg, "channel-delete", accountId)) actions.push("channel-delete");
+    if (isZulipActionEnabled(cfg, "topic-edit", accountId)) actions.push("topic-edit");
+    if (isZulipActionEnabled(cfg, "topic-resolve", accountId)) actions.push("topic-resolve");
     return {
       actions: actions as unknown as readonly import("openclaw/plugin-sdk/channel-contract").ChannelMessageActionName[],
       capabilities: null,
@@ -802,6 +894,14 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
         break;
       case "topic-list":
         result = await handleTopicList(params, cfg, accountId);
+        break;
+      case "topic-edit":
+        assertZulipActionEnabled(cfg, "topic-edit", accountId);
+        result = await handleTopicEdit(params, cfg, accountId);
+        break;
+      case "topic-resolve":
+        assertZulipActionEnabled(cfg, "topic-resolve", accountId);
+        result = await handleTopicResolve(params, cfg, accountId);
         break;
       case "member-info":
         assertZulipActionEnabled(cfg, "member-info", accountId);

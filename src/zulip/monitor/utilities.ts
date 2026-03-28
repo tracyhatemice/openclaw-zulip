@@ -1,6 +1,5 @@
 import type { ResolvedZulipAccount } from "../accounts.js";
 import type { ZulipAuth } from "../client.js";
-import { normalizeTopic } from "../normalize.js";
 import {
   KEEPALIVE_INITIAL_DELAY_MS,
   KEEPALIVE_REPEAT_INTERVAL_MS,
@@ -238,22 +237,4 @@ export function shouldIgnoreMessage(params: {
     return { ignore: true, reason: "self" };
   }
   return { ignore: false };
-}
-
-export function extractZulipTopicDirective(text: string): { topic?: string; text: string } {
-  const raw = text ?? "";
-  // Allow an agent to create/switch topics by prefixing a reply with:
-  // [[zulip_topic: <topic>]]
-  const match = /^\s*\[\[zulip_topic:\s*([^\]]+)\]\]\s*\n?/i.exec(raw);
-  if (!match) {
-    return { text: raw };
-  }
-  const topic = normalizeTopic(match[1]) || undefined;
-  const nextText = raw.slice(match[0].length).trimStart();
-  if (!topic) {
-    return { text: nextText };
-  }
-  // Keep topics reasonably short (UI-friendly).
-  const truncated = topic.length > 60 ? topic.slice(0, 60).trim() : topic;
-  return { topic: truncated || topic, text: nextText };
 }

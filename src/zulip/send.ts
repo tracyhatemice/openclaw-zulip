@@ -74,6 +74,40 @@ export async function sendZulipGroupDirectMessage(params: {
   });
 }
 
+export async function editZulipMessageTopic(params: {
+  auth: ZulipAuth;
+  messageId: number;
+  topic: string;
+  propagateMode?: "change_one" | "change_later" | "change_all";
+  streamId?: number;
+  sendNotificationToOldThread?: boolean;
+  sendNotificationToNewThread?: boolean;
+  abortSignal?: AbortSignal;
+}): Promise<ZulipApiSuccess> {
+  const form: Record<string, string | number | boolean | undefined> = {
+    topic: params.topic,
+    propagate_mode: params.propagateMode ?? "change_all",
+  };
+  if (params.streamId !== undefined) {
+    form.stream_id = params.streamId;
+  }
+  if (params.sendNotificationToOldThread !== undefined) {
+    form.send_notification_to_old_thread = params.sendNotificationToOldThread;
+  }
+  if (params.sendNotificationToNewThread !== undefined) {
+    form.send_notification_to_new_thread = params.sendNotificationToNewThread;
+  }
+
+  return await zulipRequestWithRetry<ZulipApiSuccess>({
+    auth: params.auth,
+    method: "PATCH",
+    path: `/api/v1/messages/${encodeURIComponent(String(params.messageId))}`,
+    form,
+    abortSignal: params.abortSignal,
+    retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5_000 },
+  });
+}
+
 export async function editZulipStreamMessage(params: {
   auth: ZulipAuth;
   messageId: number;
