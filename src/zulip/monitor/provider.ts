@@ -27,7 +27,7 @@ import {
 import { sendZulipStreamMessage } from "../send.js";
 import { fetchZulipMe, fetchZulipSubscriptions, pollEvents, registerQueue } from "./api.js";
 import { handleMessage, prepareMessageForHandling } from "./message-handler.js";
-import { parseTopicRenameEvent, recordTopicRenameAlias, resolveCanonicalTopicSessionKey, safeDecodeTopicKey } from "./topic-management.js";
+import { parseTopicRenameEvent, TopicRenameTracker, safeDecodeTopicKey } from "./topic-management.js";
 import {
   type MonitorContext,
   type MonitorZulipOptions,
@@ -124,9 +124,7 @@ export async function monitorZulipProvider(
       return processedMessageWriteChain;
     };
 
-    // Topic-rename alias map: composite keys "stream\0topicKey" -> canonical "stream\0topicKey".
-    // Supports both same-stream renames and cross-stream topic moves.
-    const topicAliases = new Map<string, string>();
+    const topicTracker = new TopicRenameTracker();
     // Stream ID -> stream name mapping for resolving cross-stream move events.
     const streamIdToName = await fetchZulipSubscriptions(auth, abortSignal);
 
@@ -173,7 +171,7 @@ export async function monitorZulipProvider(
       set processedMessageWriteChain(value) {
         processedMessageWriteChain = value;
       },
-      topicAliases,
+      topicTracker,
       streamIdToName,
       reactionMessageContexts: new Map(),
       logTrace,
@@ -374,10 +372,17 @@ export async function monitorZulipProvider(
           continue;
         }
 
+        // Resolve the current topic name in case it was renamed after the checkpoint was persisted.
+        const { stream: cpCanonicalStream, topicKey: cpCanonicalTopicKey } =
+          topicTracker.resolveCanonicalSessionKey(checkpoint.stream, checkpoint.topic);
+        const cpCurrent = topicTracker.resolveCurrentTarget(cpCanonicalStream, cpCanonicalTopicKey);
+        const recoveryStream = cpCurrent?.stream ?? checkpoint.stream;
+        const recoveryTopic = cpCurrent?.topic ?? checkpoint.topic;
+
         await sendZulipStreamMessage({
           auth,
-          stream: checkpoint.stream,
-          topic: checkpoint.topic,
+          stream: recoveryStream,
+          topic: recoveryTopic,
           content: ZULIP_RECOVERY_NOTICE,
           abortSignal,
         }).catch((err) => {
@@ -392,9 +397,9 @@ export async function monitorZulipProvider(
           sender_id: Number(checkpoint.senderId) || 0,
           sender_full_name: checkpoint.senderName,
           sender_email: checkpoint.senderEmail,
-          display_recipient: checkpoint.stream,
+          display_recipient: recoveryStream,
           stream_id: checkpoint.streamId,
-          subject: checkpoint.topic,
+          subject: recoveryTopic,
           content: checkpoint.cleanedContent,
           timestamp:
             typeof checkpoint.timestampMs === "number"
@@ -449,7 +454,7 @@ export async function monitorZulipProvider(
         // Resolve the session key for queue routing — same canonical-topic logic
         // the handler itself uses, so messages in the same topic serialize.
         const { topicKey: canonicalTopicKey, stream: canonicalStream } =
-          resolveCanonicalTopicSessionKey({ aliases: topicAliases, stream: prepared.stream, topic: prepared.topic });
+          topicTracker.resolveCanonicalSessionKey(prepared.stream, prepared.topic);
         const canonicalTopic = safeDecodeTopicKey(canonicalTopicKey);
         const route = core.channel.routing.resolveAgentRoute({
           cfg,
@@ -661,8 +666,7 @@ export async function monitorZulipProvider(
               toStream = stream;
             }
 
-            const mapped = recordTopicRenameAlias({
-              aliases: topicAliases,
+            const mapped = topicTracker.recordRename({
               fromStream,
               fromTopic: rename.fromTopic,
               toStream,

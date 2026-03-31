@@ -472,4 +472,219 @@ describe("monitorZulipProvider topic rename session continuity", () => {
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
   });
+
+  it("delivers to renamed topic when message arrived before rename", async () => {
+    // Message arrives in "alpha", then the topic is renamed to "beta".
+    // The reply should target "beta" (the current topic), not "alpha".
+    const { dispatchReplyFromConfig } = createHarness([
+      {
+        id: 101,
+        message: makeMessage(9001, "alpha"),
+      },
+      {
+        id: 102,
+        type: "update_message",
+        orig_subject: "alpha",
+        subject: "beta",
+      },
+    ]);
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
+
+    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
+    // Session key uses canonical (oldest) topic
+    expect(ctx.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
+    // To field uses current (renamed) topic for delivery
+    expect(ctx.To).toBe("stream:marcel#beta");
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("delivers to latest topic after chained renames", async () => {
+    // Topic is renamed alpha → beta → gamma, then a message arrives in "alpha".
+    // Delivery should target "gamma" (the latest name).
+    const { dispatchReplyFromConfig } = createHarness([
+      {
+        id: 101,
+        type: "update_message",
+        orig_topic: "alpha",
+        topic: "beta",
+      },
+      {
+        id: 102,
+        type: "update_message",
+        orig_subject: "beta",
+        subject: "gamma",
+      },
+      {
+        id: 103,
+        message: makeMessage(9001, "alpha"),
+      },
+    ]);
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
+
+    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
+    expect(ctx.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
+    expect(ctx.To).toBe("stream:marcel#gamma");
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("handles rename back to original topic name", async () => {
+    // alpha → beta, then beta → alpha. A message in "beta" should deliver to "alpha".
+    const { dispatchReplyFromConfig } = createHarness([
+      {
+        id: 101,
+        type: "update_message",
+        orig_subject: "alpha",
+        subject: "beta",
+      },
+      {
+        id: 102,
+        type: "update_message",
+        orig_subject: "beta",
+        subject: "alpha",
+      },
+      {
+        id: 103,
+        message: makeMessage(9001, "beta"),
+      },
+    ]);
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
+
+    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
+    expect(ctx.SessionKey).toBe("agent:main:zulip:channel:stream:marcel#alpha");
+    expect(ctx.To).toBe("stream:marcel#alpha");
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TopicRenameTracker unit tests
+// ---------------------------------------------------------------------------
+
+import { TopicRenameTracker } from "./topic-management.js";
+
+describe("TopicRenameTracker", () => {
+  it("resolveCanonicalSessionKey returns topic unchanged when no aliases exist", () => {
+    const tracker = new TopicRenameTracker();
+    const result = tracker.resolveCanonicalSessionKey("stream", "my topic");
+    expect(result.stream).toBe("stream");
+    expect(result.topicKey).toBe("my%20topic");
+  });
+
+  it("resolveCanonicalSessionKey follows a single alias", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "s", fromTopic: "alpha", toStream: "s", toTopic: "beta" });
+
+    // beta resolves to canonical alpha
+    const result = tracker.resolveCanonicalSessionKey("s", "beta");
+    expect(result.topicKey).toBe("alpha");
+  });
+
+  it("resolveCanonicalSessionKey follows a chain of aliases", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "s", fromTopic: "alpha", toStream: "s", toTopic: "beta" });
+    tracker.recordRename({ fromStream: "s", fromTopic: "beta", toStream: "s", toTopic: "gamma" });
+
+    const result = tracker.resolveCanonicalSessionKey("s", "gamma");
+    expect(result.topicKey).toBe("alpha");
+  });
+
+  it("path compression makes subsequent lookups single-hop", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "s", fromTopic: "a", toStream: "s", toTopic: "b" });
+    tracker.recordRename({ fromStream: "s", fromTopic: "b", toStream: "s", toTopic: "c" });
+
+    // First resolve triggers path compression
+    tracker.resolveCanonicalSessionKey("s", "c");
+
+    // After compression, "b" should point directly to "a" (single hop)
+    const resultB = tracker.resolveCanonicalSessionKey("s", "b");
+    expect(resultB.topicKey).toBe("a");
+  });
+
+  it("resolveCurrentTarget returns the latest topic name after a rename", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "s", fromTopic: "alpha", toStream: "s", toTopic: "beta" });
+
+    const canonical = tracker.resolveCanonicalSessionKey("s", "alpha");
+    const current = tracker.resolveCurrentTarget(canonical.stream, canonical.topicKey);
+    expect(current).toEqual({ stream: "s", topic: "beta" });
+  });
+
+  it("resolveCurrentTarget returns the latest name after chained renames", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "s", fromTopic: "alpha", toStream: "s", toTopic: "beta" });
+    tracker.recordRename({ fromStream: "s", fromTopic: "beta", toStream: "s", toTopic: "gamma" });
+
+    const canonical = tracker.resolveCanonicalSessionKey("s", "alpha");
+    const current = tracker.resolveCurrentTarget(canonical.stream, canonical.topicKey);
+    expect(current).toEqual({ stream: "s", topic: "gamma" });
+  });
+
+  it("resolveCurrentTarget returns undefined when no rename recorded", () => {
+    const tracker = new TopicRenameTracker();
+    const canonical = tracker.resolveCanonicalSessionKey("s", "alpha");
+    expect(tracker.resolveCurrentTarget(canonical.stream, canonical.topicKey)).toBeUndefined();
+  });
+
+  it("recordRename returns false when from and to resolve to the same canonical", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "s", fromTopic: "alpha", toStream: "s", toTopic: "beta" });
+    // Rename beta → alpha: both resolve to canonical "alpha"
+    const result = tracker.recordRename({ fromStream: "s", fromTopic: "beta", toStream: "s", toTopic: "alpha" });
+    expect(result).toBe(false);
+
+    // But currentTarget should be updated to "alpha"
+    const canonical = tracker.resolveCanonicalSessionKey("s", "alpha");
+    const current = tracker.resolveCurrentTarget(canonical.stream, canonical.topicKey);
+    expect(current).toEqual({ stream: "s", topic: "alpha" });
+  });
+
+  it("handles cross-stream topic moves", () => {
+    const tracker = new TopicRenameTracker();
+    tracker.recordRename({ fromStream: "stream-a", fromTopic: "topic", toStream: "stream-b", toTopic: "topic" });
+
+    // "topic" in stream-b should resolve to canonical in stream-a
+    const canonical = tracker.resolveCanonicalSessionKey("stream-b", "topic");
+    expect(canonical.stream).toBe("stream-a");
+
+    // Current target should point to stream-b
+    const current = tracker.resolveCurrentTarget("stream-a", canonical.topicKey);
+    expect(current).toEqual({ stream: "stream-b", topic: "topic" });
+  });
 });

@@ -5,6 +5,7 @@ import type { ZulipAuth } from "../client.js";
 import type { createDedupeCache } from "../dedupe.js";
 import type { ZulipProcessedMessageState } from "../processed-message-state.js";
 import type { getZulipRuntime } from "../../runtime.js";
+import type { TopicRenameTracker } from "./topic-management.js";
 
 export type MonitorZulipOptions = {
   accountId?: string;
@@ -187,7 +188,7 @@ export type MonitorContext = {
   readonly dedupe: ReturnType<typeof createDedupeCache>;
   processedMessageState: ZulipProcessedMessageState;
   processedMessageWriteChain: Promise<void>;
-  readonly topicAliases: Map<string, string>;
+  readonly topicTracker: TopicRenameTracker;
   readonly streamIdToName: Map<number, string>;
   readonly reactionMessageContexts: Map<
     number,

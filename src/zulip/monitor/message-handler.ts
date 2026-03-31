@@ -31,7 +31,7 @@ import {
   withWorkflowReactionStages,
 } from "./reactions.js";
 import { deliverReply } from "./reply-delivery.js";
-import { resolveCanonicalTopicSessionKey, safeDecodeTopicKey } from "./topic-management.js";
+import { safeDecodeTopicKey } from "./topic-management.js";
 import {
   classifyZulipMessage,
   DEFAULT_DISPATCH_WAIT_FOR_IDLE_TIMEOUT_MS,
@@ -385,8 +385,8 @@ export async function handleMessage(
   messageOptions?: { recoveryCheckpoint?: ZulipInFlightCheckpoint },
 ) {
   const msg = prepared.msg;
-  const stream = prepared.stream;
-  const topic = prepared.topic;
+  let stream = prepared.stream;
+  let topic = prepared.topic;
   const content = prepared.content;
   const isRecovery = prepared.isRecovery;
 
@@ -585,16 +585,21 @@ export async function handleMessage(
   }
   // Resolve canonical stream + topic for session continuity across renames and cross-stream moves.
   const { stream: canonicalStream, topicKey: canonicalTopicKey } =
-    resolveCanonicalTopicSessionKey({
-      aliases: ctx.topicAliases,
-      stream,
-      topic,
-    });
+    ctx.topicTracker.resolveCanonicalSessionKey(stream, topic);
   // Embed the full stream:name#topic as the peer ID so the session key
   // matches what the SDK's fallback outbound resolver produces.  This
   // prevents a second "mirror" session from being created when the agent
   // sends replies via the message tool.
   const canonicalTopic = safeDecodeTopicKey(canonicalTopicKey);
+
+  // Resolve the current (latest renamed) topic for delivery.  The canonical
+  // topic is the oldest name (stable for session keys), but delivery must
+  // target the current Zulip topic to avoid sending to a stale/recreated name.
+  const currentTarget = ctx.topicTracker.resolveCurrentTarget(canonicalStream, canonicalTopicKey);
+  if (currentTarget) {
+    stream = currentTarget.stream;
+    topic = currentTarget.topic;
+  }
   const route = ctx.core.channel.routing.resolveAgentRoute({
     cfg: ctx.cfg,
     channel: "zulip",

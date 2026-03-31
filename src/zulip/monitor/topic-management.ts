@@ -71,71 +71,129 @@ export function parseTopicRenameEvent(
   return { fromTopic, toTopic };
 }
 
-export function resolveCanonicalTopicSessionKey(params: {
-  aliases: Map<string, string>;
-  stream: string;
-  topic: string;
-}): { stream: string; topicKey: string } {
-  const topicKey = buildTopicKey(params.topic);
-  let compositeKey = `${params.stream}\0${topicKey}`;
+// ---------------------------------------------------------------------------
+// TopicRenameTracker
+// ---------------------------------------------------------------------------
 
-  const visited = new Set<string>();
-  const visitedOrder: string[] = [];
+export type TopicTarget = { stream: string; topic: string };
 
-  while (true) {
-    const next = params.aliases.get(compositeKey);
-    if (!next || next === compositeKey || visited.has(compositeKey)) {
-      break;
+/** Internal alias target — uses topicKey (encoded) rather than raw topic name. */
+type AliasTarget = { stream: string; topicKey: string };
+
+/**
+ * Tracks topic rename aliases for session continuity and resolves the
+ * current (latest) topic name for message delivery.
+ *
+ * Uses nested Maps (`stream → topicKey → target`) instead of composite
+ * string keys for type safety and clarity.
+ */
+export class TopicRenameTracker {
+  /** Alias chain: stream → topicKey → canonical AliasTarget (NEW → OLD). */
+  private readonly aliases = new Map<string, Map<string, AliasTarget>>();
+  /** Forward map: canonical stream → topicKey → current TopicTarget (OLD → CURRENT). */
+  private readonly currentNames = new Map<string, Map<string, TopicTarget>>();
+
+  // --- private nested-map helpers ---
+
+  private getAlias(stream: string, topicKey: string): AliasTarget | undefined {
+    return this.aliases.get(stream)?.get(topicKey);
+  }
+
+  private setAlias(stream: string, topicKey: string, target: AliasTarget): void {
+    let inner = this.aliases.get(stream);
+    if (!inner) {
+      inner = new Map();
+      this.aliases.set(stream, inner);
     }
-    visited.add(compositeKey);
-    visitedOrder.push(compositeKey);
-    compositeKey = next;
+    inner.set(topicKey, target);
   }
 
-  // Path compression: point all intermediate aliases directly at the canonical key.
-  if (visitedOrder.length > 0) {
-    for (const alias of visitedOrder) {
-      params.aliases.set(alias, compositeKey);
+  private setCurrentName(stream: string, topicKey: string, target: TopicTarget): void {
+    let inner = this.currentNames.get(stream);
+    if (!inner) {
+      inner = new Map();
+      this.currentNames.set(stream, inner);
     }
+    inner.set(topicKey, target);
   }
 
-  const sepIdx = compositeKey.indexOf("\0");
-  const stream = compositeKey.substring(0, sepIdx);
-  const resolvedTopicKey = compositeKey.substring(sepIdx + 1);
-  return { stream, topicKey: resolvedTopicKey };
-}
+  // --- public API ---
 
-export function recordTopicRenameAlias(params: {
-  aliases: Map<string, string>;
-  fromStream: string;
-  fromTopic: string;
-  toStream: string;
-  toTopic: string;
-}): boolean {
-  const fromTopic = normalizeTopic(params.fromTopic);
-  const toTopic = normalizeTopic(params.toTopic);
-  if (!fromTopic || !toTopic) {
-    return false;
+  /**
+   * Record a topic rename/move. Returns true if a new alias was created.
+   * Always updates the current-name mapping regardless of whether a new
+   * alias is needed (handles rename-back-to-original).
+   */
+  recordRename(params: {
+    fromStream: string;
+    fromTopic: string;
+    toStream: string;
+    toTopic: string;
+  }): boolean {
+    const fromTopic = normalizeTopic(params.fromTopic);
+    const toTopic = normalizeTopic(params.toTopic);
+    if (!fromTopic || !toTopic) {
+      return false;
+    }
+
+    const from = this.resolveCanonicalSessionKey(params.fromStream, fromTopic);
+    const to = this.resolveCanonicalSessionKey(params.toStream, toTopic);
+
+    // Always update current name — handles rename-back-to-original case.
+    this.setCurrentName(from.stream, from.topicKey, {
+      stream: params.toStream,
+      topic: toTopic,
+    });
+
+    if (from.stream === to.stream && from.topicKey === to.topicKey) {
+      return false;
+    }
+
+    // Point new topic's canonical at old topic's canonical.
+    this.setAlias(to.stream, to.topicKey, { stream: from.stream, topicKey: from.topicKey });
+    return true;
   }
 
-  const fromResult = resolveCanonicalTopicSessionKey({
-    aliases: params.aliases,
-    stream: params.fromStream,
-    topic: fromTopic,
-  });
-  const toResult = resolveCanonicalTopicSessionKey({
-    aliases: params.aliases,
-    stream: params.toStream,
-    topic: toTopic,
-  });
+  /**
+   * Resolve the canonical (oldest) session key for a given stream + topic.
+   * Follows the alias chain with path compression.  Depth-limited for
+   * safety — cycles cannot form in normal operation but we guard against bugs.
+   */
+  resolveCanonicalSessionKey(
+    stream: string,
+    topic: string,
+  ): { stream: string; topicKey: string } {
+    const topicKey = buildTopicKey(topic);
+    let curStream = stream;
+    let curKey = topicKey;
 
-  const fromCompositeKey = `${fromResult.stream}\0${fromResult.topicKey}`;
-  const toCompositeKey = `${toResult.stream}\0${toResult.topicKey}`;
+    const chain: AliasTarget[] = [];
+    for (let i = 0; i < 100; i++) {
+      const next = this.getAlias(curStream, curKey);
+      if (!next || (next.stream === curStream && next.topicKey === curKey)) {
+        break;
+      }
+      chain.push({ stream: curStream, topicKey: curKey });
+      curStream = next.stream;
+      curKey = next.topicKey;
+    }
 
-  if (fromCompositeKey === toCompositeKey) {
-    return false;
+    // Path compression: point all intermediate nodes directly at canonical.
+    for (const node of chain) {
+      this.setAlias(node.stream, node.topicKey, { stream: curStream, topicKey: curKey });
+    }
+
+    return { stream: curStream, topicKey: curKey };
   }
 
-  params.aliases.set(toCompositeKey, fromCompositeKey);
-  return true;
+  /**
+   * Resolve the current (latest renamed) topic target for delivery.
+   * Returns undefined if no rename has been recorded for this canonical key.
+   */
+  resolveCurrentTarget(
+    canonicalStream: string,
+    canonicalTopicKey: string,
+  ): TopicTarget | undefined {
+    return this.currentNames.get(canonicalStream)?.get(canonicalTopicKey);
+  }
 }
