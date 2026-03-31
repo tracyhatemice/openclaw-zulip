@@ -1,6 +1,6 @@
 {
   "name": "@tracyhatemic/zulip",
-  "version": "2026.3.26",
+  "version": "2026.3.31",
   "description": "OpenClaw Zulip channel plugin",
   "files": [
     "index.ts",
@@ -19,7 +19,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.23"
+    "openclaw": ">=2026.3.24"
   },
   "devDependencies": {
     "openclaw": "^2026.3.24",
