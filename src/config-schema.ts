@@ -99,6 +99,7 @@ const ZulipAccountSchemaBase = z
     topicBindings: TopicBindingsSchema.optional(),
     actions: ActionsSchema.optional(),
     reactions: ReactionSchema.optional(),
+    keepaliveMessage: z.boolean().optional(),
     textChunkLimit: z.number().int().positive().optional(),
     mediaMaxMb: z.number().int().positive().optional(),
   })

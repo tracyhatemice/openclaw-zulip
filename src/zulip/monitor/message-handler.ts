@@ -826,26 +826,28 @@ export async function handleMessage(
     ? withWorkflowReactionStages(dispatcher, reactions, reactionController, ctx.abortSignal)
     : dispatcher;
 
-  const stopKeepalive = startPeriodicKeepalive({
-    sendPing: async (elapsedMs) => {
-      if (isMainRelayActive()) {
-        return;
-      }
-      // If tool progress has an active batched message, update it with
-      // a heartbeat instead of sending a separate keepalive message.
-      if (toolProgress.hasContent) {
-        toolProgress.addHeartbeat(elapsedMs);
-        return;
-      }
-      await sendZulipStreamMessage({
-        auth: ctx.auth,
-        stream,
-        topic,
-        content: buildKeepaliveMessageContent(elapsedMs),
-        abortSignal: deliverySignal,
-      });
-    },
-  });
+  const stopKeepalive = ctx.account.keepaliveMessage
+    ? startPeriodicKeepalive({
+        sendPing: async (elapsedMs) => {
+          if (isMainRelayActive()) {
+            return;
+          }
+          // If tool progress has an active batched message, update it with
+          // a heartbeat instead of sending a separate keepalive message.
+          if (toolProgress.hasContent) {
+            toolProgress.addHeartbeat(elapsedMs);
+            return;
+          }
+          await sendZulipStreamMessage({
+            auth: ctx.auth,
+            stream,
+            topic,
+            content: buildKeepaliveMessageContent(elapsedMs),
+            abortSignal: deliverySignal,
+          });
+        },
+      })
+    : () => {};
 
   mainRelayRegistered =
     registerMainRelayRun({

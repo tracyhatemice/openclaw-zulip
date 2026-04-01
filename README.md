@@ -140,6 +140,9 @@ The Zulip channel is configured under `channels.zulip` in `openclaw.json`. You c
         "spawnSubagentSessions": false // allow subagent spawning to create topics
       },
 
+      // -- Keepalive --
+      "keepaliveMessage": true,       // send periodic "still working" messages (default: true)
+
       // -- Limits --
       "textChunkLimit": 10000,        // max chars before chunking messages
       "mediaMaxMb": 5,                // max inbound/outbound media size in MB
@@ -185,6 +188,7 @@ The Zulip channel is configured under `channels.zulip` in `openclaw.json`. You c
 | `topicBindings` | TopicBindingsConfig | — | Subagent topic binding settings |
 | `actions` | ActionsConfig | — | Gated action toggles |
 | `reactions` | ReactionConfig | — | Reaction indicator settings |
+| `keepaliveMessage` | boolean | `true` | Send periodic "still working" messages |
 | `textChunkLimit` | number | `10000` | Max chars before chunking |
 | `mediaMaxMb` | number | `5` | Max media size in MB |
 

@@ -116,6 +116,9 @@ export type ZulipAccountConfig = {
   /** Reaction indicators while responding. */
   reactions?: ZulipReactionConfig;
 
+  /** Send periodic "still working" messages. Default: true. */
+  keepaliveMessage?: boolean;
+
   /** Maximum chars before chunking. */
   textChunkLimit?: number;
 

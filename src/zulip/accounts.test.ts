@@ -185,6 +185,16 @@ describe("resolveZulipAccount", () => {
     expect(result.requireMention).toBe(true);
   });
 
+  it("defaults keepaliveMessage to true", () => {
+    const result = resolveZulipAccount({ cfg: makeConfig() });
+    expect(result.keepaliveMessage).toBe(true);
+  });
+
+  it("resolves keepaliveMessage false when explicitly disabled", () => {
+    const result = resolveZulipAccount({ cfg: makeConfig({ keepaliveMessage: false }) });
+    expect(result.keepaliveMessage).toBe(false);
+  });
+
   it("defaults defaultTopic to 'general chat'", () => {
     const result = resolveZulipAccount({ cfg: makeConfig() });
     expect(result.defaultTopic).toBe("general chat");

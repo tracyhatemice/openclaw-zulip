@@ -75,6 +75,7 @@ export type ResolvedZulipAccount = {
   defaultTopic: string;
   reactions: ResolvedZulipReactions;
   textChunkLimit: number;
+  keepaliveMessage: boolean;
   groupDmEnabled: boolean;
   config: ZulipAccountConfig;
 };
@@ -249,6 +250,7 @@ export function resolveZulipAccount(params: {
   const reactions = resolveReactions(merged.reactions);
   const textChunkLimit =
     typeof merged.textChunkLimit === "number" ? merged.textChunkLimit : DEFAULT_TEXT_CHUNK_LIMIT;
+  const keepaliveMessage = merged.keepaliveMessage !== false;
   const groupDmEnabled = merged.dm?.groupDm?.enabled === true;
 
   return {
@@ -267,6 +269,7 @@ export function resolveZulipAccount(params: {
     defaultTopic,
     reactions,
     textChunkLimit,
+    keepaliveMessage,
     groupDmEnabled,
     config: merged,
   };
