@@ -105,7 +105,7 @@ export const zulipPlugin = createChatChannelPlugin({
       messageToolHints: () => [
         "- Zulip stream targets use `stream:<name>#<topic>` format. Topic is optional (defaults to account's defaultTopic).",
         "- DM targets use `user:<senderId>` format. Group DM targets use `group-dm:<id1>,<id2>` format.",
-        "- Use `sendWithReactions` action to present numbered choices via emoji reactions (workaround for no interactive buttons).",
+        "- Use `poll` action with `pollQuestion` and `pollOption` params to present choices via emoji reactions (Zulip has no native polls, so reactions simulate voting).",
         "- Zulip supports spoiler blocks with ` ```spoiler title\\n...\\n``` ` syntax for collapsible content.",
         "- Mention users with `@**Full Name**` syntax. Use `@**all**` or `@**everyone**` for wildcard mentions.",
         "- Use `topic-list` action to list topics in a stream."

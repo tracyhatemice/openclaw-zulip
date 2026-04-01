@@ -110,7 +110,7 @@ describe("describeMessageTool", () => {
     expect(result.actions).toContain("search");
     expect(result.actions).toContain("edit");
     expect(result.actions).toContain("delete");
-    expect(result.actions).toContain("sendWithReactions");
+    expect(result.actions).toContain("poll");
   });
 
   it("includes channel-create when enabled in config", () => {
@@ -671,20 +671,20 @@ describe("handleAction - unknown", () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleAction - sendWithReactions
+// handleAction - poll
 // ---------------------------------------------------------------------------
 
-describe("handleAction - sendWithReactions", () => {
+describe("handleAction - poll", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it("sends message with reaction button options", async () => {
     const res = await zulipMessageActions.handleAction(
-      makeCtx("sendWithReactions", {
-        target: "stream:general#topic",
-        message: "Pick one",
-        options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      makeCtx("poll", {
+        to: "stream:general#topic",
+        pollQuestion: "Pick one",
+        pollOption: ["Yes", "No"],
       }),
     );
     expect(sendWithReactionButtons).toHaveBeenCalledWith(
@@ -693,8 +693,8 @@ describe("handleAction - sendWithReactions", () => {
         topic: "topic",
         message: "Pick one",
         options: [
-          { label: "Yes", value: "yes" },
-          { label: "No", value: "no" },
+          { label: "Yes", value: "Yes" },
+          { label: "No", value: "No" },
         ],
       }),
     );
@@ -702,12 +702,12 @@ describe("handleAction - sendWithReactions", () => {
     expect(details.messageId).toBe("42");
   });
 
-  it("parses string options", async () => {
+  it("parses string pollOption array", async () => {
     await zulipMessageActions.handleAction(
-      makeCtx("sendWithReactions", {
-        target: "stream:general#topic",
-        message: "Pick",
-        options: ["alpha", "beta"],
+      makeCtx("poll", {
+        to: "stream:general#topic",
+        pollQuestion: "Pick",
+        pollOption: ["alpha", "beta"],
       }),
     );
     expect(sendWithReactionButtons).toHaveBeenCalledWith(
@@ -720,15 +720,15 @@ describe("handleAction - sendWithReactions", () => {
     );
   });
 
-  it("throws when options not provided", async () => {
+  it("throws when pollOption not provided", async () => {
     await expect(
       zulipMessageActions.handleAction(
-        makeCtx("sendWithReactions", {
-          target: "stream:general#topic",
-          message: "Pick",
+        makeCtx("poll", {
+          to: "stream:general#topic",
+          pollQuestion: "Pick",
         }),
       ),
-    ).rejects.toThrow(/options must be an array/);
+    ).rejects.toThrow(/pollOption must be an array/);
   });
 });
 

@@ -753,15 +753,19 @@ async function handleSend(params: ActionParams, cfg: unknown, accountId?: string
 
 // -- Send With Reactions --
 
-async function handleSendWithReactions(
+async function handlePoll(
   params: ActionParams,
   cfg: unknown,
   accountId?: string | null,
 ) {
   const { auth, account } = resolveAuth(cfg, accountId);
-  const target = requireString(params, "target");
-  const message = requireString(params, "message");
-  const optionsRaw = params.options;
+  const target = requireString(params, "to");
+  const message =
+    optionalString(params, "pollQuestion") ??
+    optionalString(params, "message") ??
+    optionalString(params, "poll_question") ??
+    "";
+  const optionsRaw = params.pollOption ?? params.poll_option ?? params.options;
   const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 5 * 60 * 1000; // 5 minutes default
 
   const parsed = parseZulipStreamTarget(target);
@@ -791,7 +795,7 @@ async function handleSendWithReactions(
       })
       .filter((opt): opt is ReactionButtonOption => opt !== null);
   } else {
-    throw new Error("options must be an array of strings or {label, value} objects");
+    throw new Error("pollOption must be an array of strings or {label, value} objects");
   }
 
   if (options.length === 0) {
@@ -809,7 +813,7 @@ async function handleSendWithReactions(
 
   return {
     ok: true,
-    action: "sendWithReactions",
+    action: "poll",
     messageId: String(result.messageId),
     options: options.map((opt, idx) => ({ index: idx, label: opt.label, value: opt.value })),
   };
@@ -819,7 +823,7 @@ async function handleSendWithReactions(
 
 const BASE_ACTIONS: string[] = [
   "send",
-  "sendWithReactions",
+  "poll",
   "edit",
   "delete",
   "react",
@@ -856,8 +860,8 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
       case "send":
         result = await handleSend(params, cfg, accountId);
         break;
-      case "sendWithReactions":
-        result = await handleSendWithReactions(params, cfg, accountId);
+      case "poll":
+        result = await handlePoll(params, cfg, accountId);
         break;
       case "edit":
         assertZulipActionEnabled(cfg, "edit", accountId);
