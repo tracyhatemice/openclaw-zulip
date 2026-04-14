@@ -356,7 +356,7 @@ export const zulipPlugin = createChatChannelPlugin({
         });
         return { messageId: String(result.id ?? "unknown") };
       },
-      sendMedia: async ({ to, text, mediaUrl, accountId, cfg }) => {
+      sendMedia: async ({ to, text, mediaUrl, mediaAccess, mediaLocalRoots, mediaReadFile, accountId, cfg }) => {
         if (!mediaUrl?.trim()) {
           throw new Error("Zulip media delivery requires mediaUrl.");
         }
@@ -375,6 +375,9 @@ export const zulipPlugin = createChatChannelPlugin({
           cfg,
           accountId: account.accountId,
           mediaUrl,
+          mediaAccess,
+          mediaLocalRoots,
+          mediaReadFile,
         });
         const uploadedUrl = await uploadZulipFile({
           auth,

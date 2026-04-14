@@ -1,5 +1,7 @@
 import type { OpenClawConfig, ReplyPayload } from "openclaw/plugin-sdk";
+import type { OutboundMediaLoadOptions } from "openclaw/plugin-sdk/outbound-media";
 import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
+
 import { getZulipRuntime } from "../../runtime.js";
 import type { ResolvedZulipAccount } from "../accounts.js";
 import type { ZulipAuth } from "../client.js";
@@ -13,6 +15,9 @@ export async function deliverReply(params: {
   payload: ReplyPayload;
   cfg: OpenClawConfig;
   abortSignal?: AbortSignal;
+  mediaAccess?: OutboundMediaLoadOptions["mediaAccess"];
+  mediaLocalRoots?: OutboundMediaLoadOptions["mediaLocalRoots"];
+  mediaReadFile?: OutboundMediaLoadOptions["mediaReadFile"];
 }) {
   const core = getZulipRuntime();
   const logger = core.logging.getChildLogger({ channel: "zulip" });
@@ -68,6 +73,9 @@ export async function deliverReply(params: {
       cfg: params.cfg,
       accountId: params.account.accountId,
       mediaUrl: source,
+      mediaAccess: params.mediaAccess,
+      mediaLocalRoots: params.mediaLocalRoots,
+      mediaReadFile: params.mediaReadFile,
     });
     const uploadedUrl = await uploadZulipFile({
       auth: params.auth,

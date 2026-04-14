@@ -335,9 +335,13 @@ export async function handleDmMessage(ctx: MonitorContext, prepared: PreparedZul
           }
         }
 
-        // Handle media
-        if (payload.mediaUrl?.trim()) {
-          const resolved = await resolveOutboundMedia({ cfg: ctx.cfg, accountId: ctx.account.accountId, mediaUrl: payload.mediaUrl });
+        // Handle media (singular + plural)
+        const allMediaUrls = [
+          ...(payload.mediaUrl?.trim() ? [payload.mediaUrl.trim()] : []),
+          ...(payload.mediaUrls ?? []).filter(Boolean),
+        ];
+        for (const source of allMediaUrls) {
+          const resolved = await resolveOutboundMedia({ cfg: ctx.cfg, accountId: ctx.account.accountId, mediaUrl: source });
           const uploadedUrl = await uploadZulipFile({ auth: ctx.auth, buffer: resolved.buffer, contentType: resolved.contentType, filename: resolved.filename ?? "attachment" });
           if (isDm) {
             await sendZulipDirectMessage({ auth: ctx.auth, to: senderId, content: uploadedUrl, abortSignal: ctx.abortSignal });

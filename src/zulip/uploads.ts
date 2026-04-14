@@ -1,7 +1,10 @@
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/media-runtime";
+import {
+  loadOutboundMediaFromUrl,
+  type OutboundMediaLoadOptions,
+} from "openclaw/plugin-sdk/outbound-media";
 import { getZulipRuntime } from "../runtime.js";
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
 import { normalizeZulipBaseUrl } from "./normalize.js";
@@ -10,17 +13,6 @@ const HTTP_URL_RE = /^https?:\/\//i;
 const USER_UPLOAD_MARKER = "/user_uploads/";
 const MB = 1024 * 1024;
 const DEFAULT_MAX_BYTES = 5 * MB;
-
-function resolveLocalMediaPath(source: string): string {
-  if (!source.startsWith("file://")) {
-    return source;
-  }
-  try {
-    return fileURLToPath(source);
-  } catch {
-    throw new Error(`Invalid file:// URL: ${source}`);
-  }
-}
 
 function cleanCandidateUrl(raw: string): string {
   // Zulip content may include HTML entities when apply_markdown=true.
@@ -195,6 +187,9 @@ export async function downloadZulipUploads(params: {
 }
 
 type ZulipUploadResponse = ZulipApiSuccess & {
+  /** Preferred field since Zulip 9.0. */
+  url?: string;
+  /** @deprecated Use `url` instead. */
   uri?: string;
 };
 
@@ -245,20 +240,28 @@ export async function uploadZulipFile(params: {
           : `HTTP ${res.status}`;
     throw new Error(`Zulip API error (${res.status}): ${msg}`);
   }
-  if (!json || json.result !== "success" || !json.uri) {
-    throw new Error("Zulip upload failed: missing uri");
+  const uploadPath = json?.url ?? json?.uri;
+  if (!json || json.result !== "success" || !uploadPath) {
+    throw new Error("Zulip upload failed: missing url");
   }
 
   // Zulip returns a relative "/user_uploads/..." path.
-  return new URL(json.uri, base).toString();
+  return new URL(uploadPath, base).toString();
 }
 
 export async function resolveOutboundMedia(params: {
   cfg: OpenClawConfig;
   accountId: string;
   mediaUrl: string;
+  mediaAccess?: OutboundMediaLoadOptions["mediaAccess"];
+  mediaLocalRoots?: OutboundMediaLoadOptions["mediaLocalRoots"];
+  mediaReadFile?: OutboundMediaLoadOptions["mediaReadFile"];
 }): Promise<{ buffer: Uint8Array; contentType?: string; filename?: string }> {
-  const core = getZulipRuntime();
+  const source = params.mediaUrl.trim();
+  if (!source) {
+    throw new Error("Missing mediaUrl");
+  }
+
   const maxBytes =
     resolveChannelMediaMaxBytes({
       cfg: params.cfg,
@@ -267,29 +270,16 @@ export async function resolveOutboundMedia(params: {
       accountId: params.accountId,
     }) ?? DEFAULT_MAX_BYTES;
 
-  const source = params.mediaUrl.trim();
-  if (!source) {
-    throw new Error("Missing mediaUrl");
-  }
+  const result = await loadOutboundMediaFromUrl(source, {
+    maxBytes,
+    mediaAccess: params.mediaAccess,
+    mediaLocalRoots: params.mediaLocalRoots,
+    mediaReadFile: params.mediaReadFile,
+  });
 
-  if (HTTP_URL_RE.test(source)) {
-    const fetched = await core.channel.media.fetchRemoteMedia({ url: source, maxBytes });
-    return { buffer: fetched.buffer, contentType: fetched.contentType, filename: fetched.fileName };
-  }
-
-  const resolvedPath = resolveLocalMediaPath(source);
-  const fs = await import("node:fs/promises");
-  const stats = await fs.stat(resolvedPath);
-  if (stats.size > maxBytes) {
-    const maxLabel = (maxBytes / MB).toFixed(0);
-    const sizeLabel = (stats.size / MB).toFixed(2);
-    throw new Error(`Media exceeds ${maxLabel}MB limit (got ${sizeLabel}MB)`);
-  }
-  const buffer = await fs.readFile(resolvedPath);
-  const detected = await core.media.detectMime({ buffer, filePath: resolvedPath });
   return {
-    buffer: new Uint8Array(buffer),
-    contentType: detected ?? undefined,
-    filename: path.basename(resolvedPath) || undefined,
+    buffer: new Uint8Array(result.buffer),
+    contentType: result.contentType,
+    filename: result.fileName,
   };
 }
