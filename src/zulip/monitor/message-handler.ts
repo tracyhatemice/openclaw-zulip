@@ -1,4 +1,5 @@
 import type { ReplyPayload } from "openclaw/plugin-sdk";
+import { buildAgentMediaPayload } from "openclaw/plugin-sdk/agent-media-payload";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
 import { getZulipRuntime } from "../../runtime.js";
@@ -244,9 +245,9 @@ export async function handleDmMessage(ctx: MonitorContext, prepared: PreparedZul
     content,
     abortSignal: ctx.abortSignal,
   });
-  const mediaPaths = inboundUploads.map((entry) => entry.path);
-  const mediaUrls = inboundUploads.map((entry) => entry.url);
-  const mediaTypes = inboundUploads.map((entry) => entry.contentType ?? "");
+  const mediaPayload = buildAgentMediaPayload(
+    inboundUploads.map((entry) => ({ path: entry.path, contentType: entry.contentType })),
+  );
 
   let cleanedContent = content;
   for (const upload of inboundUploads) {
@@ -290,12 +291,7 @@ export async function handleDmMessage(ctx: MonitorContext, prepared: PreparedZul
     OriginatingChannel: "zulip" as const,
     OriginatingTo: to,
     Timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
-    MediaPath: mediaPaths[0],
-    MediaUrl: mediaUrls[0],
-    MediaType: mediaTypes[0],
-    MediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
-    MediaUrls: mediaUrls.length > 0 ? mediaUrls : undefined,
-    MediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+    ...mediaPayload,
     CommandAuthorized: true,
   });
 
@@ -559,9 +555,9 @@ export async function handleMessage(
     content,
     abortSignal: ctx.abortSignal,
   });
-  const mediaPaths = inboundUploads.map((entry) => entry.path);
-  const mediaUrls = inboundUploads.map((entry) => entry.url);
-  const mediaTypes = inboundUploads.map((entry) => entry.contentType ?? "");
+  const mediaPayload = buildAgentMediaPayload(
+    inboundUploads.map((entry) => ({ path: entry.path, contentType: entry.contentType })),
+  );
 
   // Strip downloaded upload URLs from the content so the native image loader
   // doesn't try to open raw /user_uploads/... paths as local files.
@@ -659,12 +655,7 @@ export async function handleMessage(
     OriginatingChannel: "zulip" as const,
     OriginatingTo: to,
     Timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
-    MediaPath: mediaPaths[0],
-    MediaUrl: mediaUrls[0],
-    MediaType: mediaTypes[0],
-    MediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
-    MediaUrls: mediaUrls.length > 0 ? mediaUrls : undefined,
-    MediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+    ...mediaPayload,
     CommandAuthorized: true,
   });
 
@@ -695,9 +686,9 @@ export async function handleMessage(
         wasMentioned,
         streamId: msg.stream_id,
         timestampMs: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
-        mediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
-        mediaUrls: mediaUrls.length > 0 ? mediaUrls : undefined,
-        mediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+        mediaPaths: mediaPayload.MediaPaths,
+        mediaUrls: mediaPayload.MediaUrls,
+        mediaTypes: mediaPayload.MediaTypes,
         createdAtMs: nowMs,
         updatedAtMs: nowMs,
         retryCount: 0,
