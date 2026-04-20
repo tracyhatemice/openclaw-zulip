@@ -5,6 +5,7 @@ import {
   loadOutboundMediaFromUrl,
   type OutboundMediaLoadOptions,
 } from "openclaw/plugin-sdk/outbound-media";
+import type { SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 import { getZulipRuntime } from "../runtime.js";
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
 import { normalizeZulipBaseUrl } from "./normalize.js";
@@ -82,35 +83,6 @@ export function extractZulipUploadUrls(content: string, baseUrl: string): string
   return out;
 }
 
-function buildZulipAuthFetch(params: {
-  auth: ZulipAuth;
-  includeAuthForOrigin?: string;
-}): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
-  const token = Buffer.from(`${params.auth.email}:${params.auth.apiKey}`, "utf8").toString(
-    "base64",
-  );
-  const includeAuthForOrigin = params.includeAuthForOrigin;
-  return async (input, init) => {
-    const url =
-      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const headers = new Headers(init?.headers);
-    if (includeAuthForOrigin) {
-      try {
-        if (new URL(url).origin === includeAuthForOrigin) {
-          headers.set("Authorization", `Basic ${token}`);
-        } else {
-          headers.delete("Authorization");
-        }
-      } catch {
-        headers.delete("Authorization");
-      }
-    } else {
-      headers.set("Authorization", `Basic ${token}`);
-    }
-    return await fetch(input, { ...init, headers });
-  };
-}
-
 function resolveFilenameFromUrl(url: string): string | undefined {
   try {
     const parsed = new URL(url);
@@ -128,6 +100,79 @@ export type ZulipInboundUpload = {
   placeholder: string;
 };
 
+type ZulipTemporaryUrlResponse = ZulipApiSuccess & {
+  url?: string;
+};
+
+/**
+ * Resolve the `/user_uploads/{realm_id}/{filename}` portion of an absolute
+ * upload URL. Returns null when the URL does not point at the Zulip uploads
+ * endpoint on the configured origin.
+ */
+function extractUploadPathId(uploadUrl: string, baseOrigin: string | undefined): string | null {
+  if (!baseOrigin) {
+    return null;
+  }
+  try {
+    const parsed = new URL(uploadUrl);
+    if (parsed.origin !== baseOrigin) {
+      return null;
+    }
+    const idx = parsed.pathname.indexOf(USER_UPLOAD_MARKER);
+    if (idx === -1) {
+      return null;
+    }
+    const pathId = parsed.pathname.slice(idx + USER_UPLOAD_MARKER.length);
+    return pathId.length > 0 ? pathId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask the Zulip API for a temporary unauthenticated URL to an uploaded file.
+ * See `get-file-temporary-url` in doc/zulip.yaml — the temporary URL is valid
+ * for `SIGNED_ACCESS_TOKEN_VALIDITY_IN_SECONDS` seconds and must be fetched
+ * immediately. This lets us download files regardless of whether the Zulip
+ * server is backed by local storage or S3.
+ */
+async function fetchZulipUploadTemporaryUrl(params: {
+  auth: ZulipAuth;
+  pathId: string;
+  abortSignal?: AbortSignal;
+}): Promise<string | null> {
+  const base = normalizeZulipBaseUrl(params.auth.baseUrl);
+  if (!base) {
+    return null;
+  }
+  const apiUrl = new URL(`${base}/api/v1/user_uploads/${params.pathId}`);
+  const token = Buffer.from(`${params.auth.email}:${params.auth.apiKey}`, "utf8").toString(
+    "base64",
+  );
+  const res = await fetch(apiUrl, {
+    method: "GET",
+    headers: {
+      Authorization: `Basic ${token}`,
+      Accept: "application/json",
+    },
+    signal: params.abortSignal,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Zulip temporary URL lookup failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  let json: ZulipTemporaryUrlResponse | null = null;
+  try {
+    json = text ? (JSON.parse(text) as ZulipTemporaryUrlResponse) : null;
+  } catch {
+    json = null;
+  }
+  if (!json || json.result !== "success" || !json.url) {
+    return null;
+  }
+  return new URL(json.url, base).toString();
+}
+
 export async function downloadZulipUploads(params: {
   cfg: OpenClawConfig;
   accountId: string;
@@ -137,6 +182,7 @@ export async function downloadZulipUploads(params: {
   maxFiles?: number;
 }): Promise<ZulipInboundUpload[]> {
   const core = getZulipRuntime();
+  const logger = core.logging.getChildLogger({ channel: "zulip" });
 
   const maxBytes =
     resolveChannelMediaMaxBytes({
@@ -155,32 +201,55 @@ export async function downloadZulipUploads(params: {
 
   const base = normalizeZulipBaseUrl(params.auth.baseUrl);
   const baseOrigin = base ? new URL(base).origin : undefined;
-  const fetchImpl = buildZulipAuthFetch({ auth: params.auth, includeAuthForOrigin: baseOrigin });
+  // Allow the configured Zulip origin even when it resolves to a private IP
+  // (common for self-hosted instances). The signed temporary URL is served by
+  // the same origin and may hit internal DNS.
+  const ssrfPolicy: SsrFPolicy | undefined = baseOrigin
+    ? {
+        allowedHostnames: [new URL(baseOrigin).hostname],
+        hostnameAllowlist: [new URL(baseOrigin).hostname],
+        allowPrivateNetwork: true,
+      }
+    : undefined;
 
   const out: ZulipInboundUpload[] = [];
   for (const url of limited) {
     try {
-      const fetched = await core.channel.media.fetchRemoteMedia({
-        url,
-        fetchImpl,
-        maxBytes,
+      const pathId = extractUploadPathId(url, baseOrigin);
+      if (!pathId) {
+        logger.debug?.(`[zulip] skipping upload download: unable to resolve path id for ${url}`);
+        continue;
+      }
+      const temporaryUrl = await fetchZulipUploadTemporaryUrl({
+        auth: params.auth,
+        pathId,
+        abortSignal: params.abortSignal,
       });
+      if (!temporaryUrl) {
+        logger.warn(`[zulip] no temporary URL returned for upload ${url}`);
+        continue;
+      }
+      const fetched = await core.channel.media.fetchRemoteMedia({
+        url: temporaryUrl,
+        maxBytes,
+        ssrfPolicy,
+      });
+      const label = fetched.fileName ?? resolveFilenameFromUrl(url);
       const saved = await core.channel.media.saveMediaBuffer(
         fetched.buffer,
         fetched.contentType,
         "inbound",
         maxBytes,
-        fetched.fileName ?? resolveFilenameFromUrl(url),
+        label,
       );
-      const label = fetched.fileName ?? resolveFilenameFromUrl(url);
       out.push({
         url,
         path: saved.path,
         contentType: saved.contentType ?? fetched.contentType,
         placeholder: label ? `[Zulip upload: ${label}]` : "[Zulip upload]",
       });
-    } catch {
-      // Ignore download errors (auth, size, redirects, etc). The original URL is still present in text.
+    } catch (err) {
+      logger.warn(`[zulip] inbound upload download failed for ${url}: ${String(err)}`);
     }
   }
   return out;
