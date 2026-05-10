@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "paths": {}
+  },
+  "include": ["index.ts", "setup-entry.ts", "api.ts", "runtime-api.ts", "src/**/*"],
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+}

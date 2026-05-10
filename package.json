@@ -8,22 +8,31 @@
     "api.ts",
     "runtime-api.ts",
     "src/",
+    "dist/",
     "openclaw.plugin.json",
-    "!src/**/*.test.ts"
+    "!src/**/*.test.ts",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts"
   ],
   "type": "module",
   "engines": {
     "node": ">=22"
   },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
   "dependencies": {
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.24"
+    "openclaw": ">=2026.5.7"
   },
   "devDependencies": {
-    "openclaw": "^2026.4.15",
-    "vitest": "^4.1.4"
+    "openclaw": "^2026.5.7",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.5"
   },
   "openclaw": {
     "extensions": [
