@@ -1,12 +1,306 @@
 {
   "id": "zulip",
   "kind": "channel",
-  "channels": ["zulip"],
   "name": "Zulip",
   "description": "OpenClaw Zulip channel plugin",
+  "channels": ["zulip"],
+  "channelEnvVars": {
+    "zulip": ["ZULIP_URL", "ZULIP_EMAIL", "ZULIP_API_KEY"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "channelConfigs": {
+    "zulip": {
+      "label": "Zulip",
+      "description": "Zulip streams/topics with reaction-based reply indicators, multi-account support, and topic-bound subagent sessions.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "$defs": {
+          "secretRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "enum": ["env", "file", "exec"] },
+              "provider": { "type": "string" },
+              "id": { "type": "string" }
+            },
+            "required": ["source", "provider", "id"]
+          },
+          "secretInput": {
+            "anyOf": [{ "type": "string", "minLength": 1 }, { "$ref": "#/$defs/secretRef" }]
+          },
+          "principalAllowFrom": {
+            "type": "array",
+            "items": { "anyOf": [{ "type": "string" }, { "type": "number" }] }
+          },
+          "streamEntry": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "streamPolicy": { "type": "string", "enum": ["open", "allowlist", "disabled"] },
+              "requireMention": { "type": "boolean" },
+              "allowFrom": { "$ref": "#/$defs/principalAllowFrom" }
+            }
+          },
+          "groupDm": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" }
+            }
+          },
+          "dm": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "policy": { "type": "string", "enum": ["open", "pairing", "allowlist", "disabled"] },
+              "allowFrom": { "$ref": "#/$defs/principalAllowFrom" },
+              "groupDm": { "$ref": "#/$defs/groupDm" }
+            }
+          },
+          "topicBindings": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "spawnSubagentSessions": { "type": "boolean" }
+            }
+          },
+          "actions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "channelCreate": { "type": "boolean" },
+              "channelEdit": { "type": "boolean" },
+              "channelDelete": { "type": "boolean" },
+              "topicEdit": { "type": "boolean" },
+              "topicResolve": { "type": "boolean" },
+              "memberInfo": { "type": "boolean" },
+              "search": { "type": "boolean" },
+              "edit": { "type": "boolean" },
+              "delete": { "type": "boolean" }
+            }
+          },
+          "reactionWorkflowStages": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "queued": { "type": "string" },
+              "processing": { "type": "string" },
+              "toolRunning": { "type": "string" },
+              "retrying": { "type": "string" },
+              "success": { "type": "string" },
+              "partialSuccess": { "type": "string" },
+              "failure": { "type": "string" }
+            }
+          },
+          "reactionWorkflow": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "replaceStageReaction": { "type": "boolean" },
+              "minTransitionMs": { "type": "integer", "minimum": 0 },
+              "stages": { "$ref": "#/$defs/reactionWorkflowStages" }
+            }
+          },
+          "genericReactionCallback": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "includeRemoveOps": { "type": "boolean" }
+            }
+          },
+          "reactions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "onStart": { "type": "string" },
+              "onSuccess": { "type": "string" },
+              "onFailure": { "type": "string" },
+              "clearOnFinish": { "type": "boolean" },
+              "workflow": { "$ref": "#/$defs/reactionWorkflow" },
+              "genericCallback": { "$ref": "#/$defs/genericReactionCallback" }
+            }
+          },
+          "zulipAccount": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "enabled": { "type": "boolean" },
+              "configWrites": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "email": { "type": "string" },
+              "apiKey": { "$ref": "#/$defs/secretInput" },
+              "streamPolicy": { "type": "string", "enum": ["open", "allowlist", "disabled"] },
+              "streams": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/streamEntry" }
+              },
+              "requireMention": { "type": "boolean" },
+              "defaultTopic": { "type": "string" },
+              "dm": { "$ref": "#/$defs/dm" },
+              "topicBindings": { "$ref": "#/$defs/topicBindings" },
+              "actions": { "$ref": "#/$defs/actions" },
+              "reactions": { "$ref": "#/$defs/reactions" },
+              "keepaliveMessage": { "type": "boolean" },
+              "textChunkLimit": { "type": "integer", "minimum": 1 },
+              "mediaMaxMb": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "properties": {
+          "name": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "configWrites": { "type": "boolean" },
+          "baseUrl": { "type": "string" },
+          "email": { "type": "string" },
+          "apiKey": { "$ref": "#/$defs/secretInput" },
+          "streamPolicy": { "type": "string", "enum": ["open", "allowlist", "disabled"] },
+          "streams": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/streamEntry" }
+          },
+          "requireMention": { "type": "boolean" },
+          "defaultTopic": { "type": "string" },
+          "dm": { "$ref": "#/$defs/dm" },
+          "topicBindings": { "$ref": "#/$defs/topicBindings" },
+          "actions": { "$ref": "#/$defs/actions" },
+          "reactions": { "$ref": "#/$defs/reactions" },
+          "keepaliveMessage": { "type": "boolean" },
+          "textChunkLimit": { "type": "integer", "minimum": 1 },
+          "mediaMaxMb": { "type": "integer", "minimum": 1 },
+          "accounts": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/zulipAccount" }
+          }
+        }
+      },
+      "uiHints": {
+        "baseUrl": {
+          "label": "Zulip Server URL",
+          "help": "Base URL of the Zulip realm (falls back to ZULIP_URL).",
+          "placeholder": "https://your-org.zulipchat.com"
+        },
+        "email": {
+          "label": "Bot Email",
+          "help": "Email address of the Zulip bot user (falls back to ZULIP_EMAIL).",
+          "placeholder": "bot@your-org.zulipchat.com"
+        },
+        "apiKey": {
+          "label": "API Key",
+          "help": "Zulip bot API key (falls back to ZULIP_API_KEY).",
+          "sensitive": true
+        },
+        "defaultTopic": {
+          "label": "Default Topic",
+          "help": "Topic name used when sending stream replies without an explicit topic.",
+          "placeholder": "general chat"
+        },
+        "streamPolicy": {
+          "label": "Stream Policy",
+          "help": "Default policy for stream messages: open, allowlist, or disabled."
+        },
+        "streams": {
+          "label": "Streams",
+          "help": "Per-stream policy overrides keyed by stream name."
+        },
+        "requireMention": {
+          "label": "Require @mention in Streams",
+          "help": "Only respond in streams when the bot is explicitly @mentioned."
+        },
+        "dm.policy": {
+          "label": "DM Policy",
+          "help": "How direct messages are accepted: open, pairing, allowlist, or disabled."
+        },
+        "dm.allowFrom": {
+          "label": "DM Allowlist",
+          "help": "User ids or emails permitted to DM the bot when the policy is allowlist."
+        },
+        "dm.groupDm.enabled": {
+          "label": "Allow Group DMs",
+          "help": "Whether group direct messages are accepted under the DM policy."
+        },
+        "topicBindings.enabled": {
+          "label": "Topic Bindings",
+          "help": "Bind agent sessions to Zulip topics so each topic continues a single conversation."
+        },
+        "topicBindings.spawnSubagentSessions": {
+          "label": "Spawn Subagent Sessions",
+          "help": "Spawn isolated subagent sessions for new topics when topic bindings are enabled."
+        },
+        "reactions.enabled": {
+          "label": "Reaction Indicators",
+          "help": "Use emoji reactions to signal start/success/failure of agent runs."
+        },
+        "reactions.clearOnFinish": {
+          "label": "Clear Reactions On Finish",
+          "help": "Remove progress reactions when the run finishes."
+        },
+        "keepaliveMessage": {
+          "label": "Periodic Keepalive Message",
+          "help": "Send a periodic status message so long-running runs remain visible.",
+          "advanced": true
+        },
+        "textChunkLimit": {
+          "label": "Text Chunk Limit",
+          "help": "Maximum characters per outbound message chunk before splitting.",
+          "advanced": true
+        },
+        "mediaMaxMb": {
+          "label": "Max Media Size (MB)",
+          "help": "Maximum size in megabytes for inbound or outbound media attachments.",
+          "advanced": true
+        },
+        "actions.channelCreate": {
+          "label": "Allow channel-create Action",
+          "advanced": true
+        },
+        "actions.channelEdit": {
+          "label": "Allow channel-edit Action",
+          "advanced": true
+        },
+        "actions.channelDelete": {
+          "label": "Allow channel-delete Action",
+          "advanced": true
+        },
+        "actions.topicEdit": {
+          "label": "Allow topic-edit Action",
+          "advanced": true
+        },
+        "actions.topicResolve": {
+          "label": "Allow topic-resolve Action",
+          "advanced": true
+        },
+        "actions.memberInfo": {
+          "label": "Allow member-info Action",
+          "advanced": true
+        },
+        "actions.search": {
+          "label": "Allow search Action",
+          "advanced": true
+        },
+        "actions.edit": {
+          "label": "Allow message-edit Action",
+          "advanced": true
+        },
+        "actions.delete": {
+          "label": "Allow message-delete Action",
+          "advanced": true
+        },
+        "accounts": {
+          "label": "Additional Accounts",
+          "help": "Named secondary Zulip accounts. Each entry mirrors the top-level fields and overrides them when the account is selected.",
+          "advanced": true
+        }
+      }
+    }
   }
 }
